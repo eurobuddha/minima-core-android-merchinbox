@@ -1,0 +1,19 @@
+{
+  "0": "MainActivity",
+  "1": "MerchDb",
+  "2": "NodeApi",
+  "3": "CommsIdentity",
+  "4": ".advanceStatus",
+  "5": "QrUtil",
+  "6": ".pill",
+  "7": "OrderAdapter",
+  "8": "Util",
+  "9": "Images",
+  "10": "BackupCrypto",
+  "11": "MailText",
+  "12": "gradlew",
+  "13": "app/build.gradle",
+  "14": "settings.gradle",
+  "15": "Sodium",
+  "16": "miniMerch Inbox (native Android)"
+}

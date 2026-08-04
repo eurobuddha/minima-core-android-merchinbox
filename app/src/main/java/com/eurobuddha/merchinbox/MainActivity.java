@@ -90,6 +90,8 @@ public class MainActivity extends AppCompatActivity {
     private final ExecutorService io = Executors.newSingleThreadExecutor();
     private final Handler ui = new Handler(Looper.getMainLooper());
     private final ArrayDeque<View> stack = new ArrayDeque<>();
+    /** NFT sends in flight, keyed ref:tokenid — blocks double-taps while the node builds the txn. */
+    private final java.util.HashSet<String> nftSending = new java.util.HashSet<>();
 
     private LinearLayout root;
     private FrameLayout container;
@@ -477,6 +479,13 @@ public class MainActivity extends AppCompatActivity {
             body.addView(kv("Method", shippingLabel(o.shipping)));
             if (!o.delivery.isEmpty()) body.addView(copyRow("Address", o.delivery, o.delivery));
             if (!o.message.isEmpty()) { body.addView(sectionLabel("Buyer note")); body.addView(card(o.message)); }
+
+            // NFT delivery — order lines that carry an NFT tokenid (from an NFT Studio .shop)
+            List<String[]> nfts = nftLines(o);
+            if (!nfts.isEmpty()) {
+                body.addView(sectionLabel("NFT delivery"));
+                for (String[] line : nfts) body.addView(nftSendRow(o, line));
+            }
         }
         body.addView(copyRow("Buyer key", shortId(o.counterparty), o.counterparty));
 
@@ -518,6 +527,97 @@ public class MainActivity extends AppCompatActivity {
                 @Override public void onFailed(String e) {}
             });
             ui.post(() -> { toast("Marked " + status); refreshTop(buildOrderDetail(o.ref)); });
+        });
+    }
+
+    // ---- NFT delivery ----
+
+    /** Order lines carrying an NFT tokenid, as {name, tokenid, quantity}. Empty on plain orders. */
+    private List<String[]> nftLines(MerchDb.Order o) {
+        List<String[]> out = new ArrayList<>();
+        if (o == null || o.items == null || o.items.isEmpty()) return out;
+        try {
+            JSONArray a = new JSONArray(o.items);
+            for (int i = 0; i < a.length(); i++) {
+                JSONObject it = a.optJSONObject(i); if (it == null) continue;
+                String tokenid = it.optString("nftTokenId", "");
+                if (tokenid.isEmpty()) continue;
+                int q = Math.max(1, it.optInt("quantity", 1));
+                out.add(new String[]{it.optString("product", "NFT"), tokenid, String.valueOf(q)});
+            }
+        } catch (Exception ignored) {}
+        return out;
+    }
+
+    private View nftSendRow(final MerchDb.Order o, final String[] line) {
+        final String name = line[0], tokenid = line[1], qty = line[2];
+        String sentTx = db.getMeta("nftsent:" + o.ref + ":" + tokenid, "");
+        if (!sentTx.isEmpty()) {
+            TextView t = new TextView(this);
+            t.setText("✓ Sent " + qty + " × " + name + ("sent".equals(sentTx) ? "" : " · " + shortId(sentTx)));
+            t.setTextColor(Design.IN); t.setTextSize(13f); t.setPadding(0, dp(4), 0, dp(4));
+            return t;
+        }
+        LinearLayout wrap = new LinearLayout(this); wrap.setOrientation(LinearLayout.VERTICAL);
+        boolean ready = o.paid && o.payaddr != null && !o.payaddr.isEmpty();
+        boolean inFlight = nftSending.contains(o.ref + ":" + tokenid);
+        TextView b = button(inFlight ? "Sending…" : "Send " + qty + " × " + name + " to buyer", ready && !inFlight);
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        lp.topMargin = dp(6); b.setLayoutParams(lp);
+        b.setOnClickListener(v -> {
+            if (!o.paid) { toast("Awaiting payment first."); return; }
+            if (o.payaddr == null || o.payaddr.isEmpty()) { toast("This order carries no buyer pay address."); return; }
+            if (nftSending.contains(o.ref + ":" + tokenid)) return;
+            new AlertDialog.Builder(this)
+                    .setTitle("Send NFT")
+                    .setMessage("Send " + qty + " × " + name + " (" + shortId(tokenid) + ") to " + shortId(o.payaddr) + "?\n\nThis transfers the NFT on-chain.")
+                    .setPositiveButton("Send", (d, w) -> sendNft(o, name, tokenid, qty))
+                    .setNegativeButton("Cancel", null)
+                    .show();
+        });
+        wrap.addView(b);
+        if (!ready) {
+            TextView why = new TextView(this);
+            why.setText(!o.paid ? "Available once the order is paid." : "The order didn't include a buyer pay address.");
+            why.setTextColor(Design.DIM2); why.setTextSize(11f); why.setPadding(0, dp(2), 0, 0);
+            wrap.addView(why);
+        }
+        return wrap;
+    }
+
+    /** The node's `send` builds+posts atomically — on failure nothing is left behind (no txndelete
+     *  needed) and we write no state, so the button simply re-enables for a retry. */
+    private void sendNft(final MerchDb.Order o, final String name, final String tokenid, final String qty) {
+        final String key = o.ref + ":" + tokenid;
+        if (!nftSending.add(key)) return;
+        refreshTop(buildOrderDetail(o.ref));
+        CommsTransport.sendPayment(node, o.payaddr, qty, tokenid, o.ref, new CommsTransport.SendCb() {
+            @Override public void onSent(final String txid) {
+                io.execute(() -> {
+                    db.setMeta("nftsent:" + o.ref + ":" + tokenid, txid == null || txid.isEmpty() ? "sent" : txid);
+                    MerchDb.Order fresh = db.order(o.ref);
+                    boolean all = fresh != null;
+                    if (fresh != null) for (String[] l : nftLines(fresh)) {
+                        if (db.getMeta("nftsent:" + o.ref + ":" + l[1], "").isEmpty()) { all = false; break; }
+                    }
+                    final boolean advance = all
+                            && (MerchDb.PAID.equals(fresh.status) || MerchDb.CONFIRMED.equals(fresh.status));
+                    final MerchDb.Order forStatus = fresh;
+                    ui.post(() -> {
+                        nftSending.remove(key);
+                        toast("NFT sent to the buyer");
+                        if (advance) advanceStatus(forStatus, MerchDb.SHIPPED);
+                        else refreshTop(buildOrderDetail(o.ref));
+                    });
+                });
+            }
+            @Override public void onFailed(final String e) {
+                ui.post(() -> {
+                    nftSending.remove(key);
+                    toast("NFT send failed: " + e);
+                    refreshTop(buildOrderDetail(o.ref));
+                });
+            }
         });
     }
 
