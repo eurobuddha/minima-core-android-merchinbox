@@ -92,6 +92,12 @@ public class MainActivity extends AppCompatActivity {
     private final ArrayDeque<View> stack = new ArrayDeque<>();
     /** NFT sends in flight, keyed ref:tokenid — blocks double-taps while the node builds the txn. */
     private final java.util.HashSet<String> nftSending = new java.util.HashSet<>();
+    /** NFT lines auto-attempted this process, keyed ref:tokenid — a failed auto-send is never looped;
+     *  the next app open (autoDeliverSweep) gets exactly one more automatic attempt. */
+    private final java.util.HashSet<String> autoTried = new java.util.HashSet<>();
+    /** Orders whose payment flipped to PAID during the current scan pass (main thread only). */
+    private final java.util.HashSet<String> pendingAutoDeliver = new java.util.HashSet<>();
+    private boolean autoSweepDone = false;
 
     private LinearLayout root;
     private FrameLayout container;
@@ -244,7 +250,12 @@ public class MainActivity extends AppCompatActivity {
 
     private void startPaymentScanner() {
         paymentScanner = new CommsScanner(node, crypto, db, vendorAddr,
-                this::routePayment, (ok, n) -> onScanDone(n), false);
+                this::routePayment, (ok, n) -> {
+                    onScanDone(n);
+                    // After the first clean pass, auto-deliver anything paid-but-unsent (e.g. an
+                    // auto-send that failed last session, or a payment that landed while closed).
+                    if (ok && !autoSweepDone) { autoSweepDone = true; autoDeliverSweep(); }
+                }, false);
     }
 
     private void askForSeed() {
@@ -292,20 +303,62 @@ public class MainActivity extends AppCompatActivity {
         String ref = hexToText(refHex);
         if (ref.isEmpty()) return false;
         MerchDb.Order o = db.order(ref);
-        if (o == null || o.paid) return false;
+        if (o == null || o.paid) return false;   // replay guard: backfill/grow-passes/restarts re-see coins
         String amount = coin.optString("amount", coin.optString("tokenamount", "0"));
         String tokenid = coin.optString("tokenid", "0x00");
-        return db.recordPayment(ref, amount, tokenid) != null;
+        String result = db.recordPayment(ref, amount, tokenid);
+        // Auto-deliver only on a clean PAID — never UNDERPAID/WRONG_TOKEN (o.paid is true even then,
+        // which is why this keys off the returned status). Queued, drained at scan end.
+        if (MerchDb.PAID.equals(result)) pendingAutoDeliver.add(ref);
+        return result != null;
     }
 
     private void onScanDone(int newCount) {
         ui.post(() -> {
+            if (!pendingAutoDeliver.isEmpty()) {
+                List<String> refs = new ArrayList<>(pendingAutoDeliver);
+                pendingAutoDeliver.clear();
+                for (String r : refs) maybeAutoDeliver(r);
+            }
             if (newCount <= 0) return;
             notifyNew(newCount);
             View top = stack.peek();
             Object tag = top == null ? null : top.getTag();
             if (stack.size() == 1) refreshTop(buildOrders());
             else if (tag instanceof String && ((String) tag).startsWith("order:")) refreshTop(buildOrderDetail(((String) tag).substring(6)));
+        });
+    }
+
+    // ---- automatic NFT delivery ----
+
+    private boolean autoDeliverOn() { return "1".equals(db.getMeta("autodeliver", "1")); }
+
+    /** Auto-send every unsent NFT line of a cleanly-paid order. Idempotent: nftsent: meta skips
+     *  delivered lines, autoTried caps automatic attempts at one per line per session. */
+    private void maybeAutoDeliver(String ref) {
+        if (!autoDeliverOn()) return;
+        MerchDb.Order o = db.order(ref);
+        if (o == null || !o.paid) return;
+        if (!MerchDb.PAID.equals(o.status) && !MerchDb.CONFIRMED.equals(o.status)) return;
+        if (o.payaddr == null || o.payaddr.isEmpty()) return;   // undeliverable — order screen explains
+        for (String[] line : nftLines(o)) {
+            String key = lineKey(ref, line);
+            if (!db.getMeta("nftsent:" + key, "").isEmpty()) continue;
+            if (!autoTried.add(key)) continue;
+            sendNft(o, line, true);
+        }
+    }
+
+    /** Once per process: re-attempt paid-but-unsent NFT orders (failed auto-send last session,
+     *  or payment that confirmed while the app was closed). */
+    private void autoDeliverSweep() {
+        if (!autoDeliverOn()) return;
+        io.execute(() -> {
+            List<String> refs = new ArrayList<>();
+            for (MerchDb.Order o : db.orders())
+                if (o.paid && (MerchDb.PAID.equals(o.status) || MerchDb.CONFIRMED.equals(o.status))
+                        && !nftLines(o).isEmpty()) refs.add(o.ref);
+            if (!refs.isEmpty()) ui.post(() -> { for (String r : refs) maybeAutoDeliver(r); });
         });
     }
 
@@ -334,6 +387,21 @@ public class MainActivity extends AppCompatActivity {
             s.setTextColor(Design.IN);
         }
         col.addView(s);
+
+        // Auto NFT delivery toggle — ON: paid NFT orders are sent to the buyer automatically.
+        final boolean auto = autoDeliverOn();
+        TextView ad = new TextView(this);
+        ad.setText("⚡ Auto NFT delivery  ·  " + (auto ? "ON" : "OFF"));
+        ad.setTextColor(auto ? Design.IN : Design.DIM);
+        ad.setTextSize(12.5f); ad.setPadding(dp(16), 0, dp(16), dp(8));
+        ad.setOnClickListener(v -> {
+            final String next = auto ? "0" : "1";
+            io.execute(() -> {
+                db.setMeta("autodeliver", next);
+                ui.post(() -> { toast("Auto NFT delivery " + ("1".equals(next) ? "on" : "off")); refreshTop(buildOrders()); });
+            });
+        });
+        col.addView(ad);
 
         col.addView(filterBar());
         final HorizontalScrollView shopBar = new HorizontalScrollView(this);
@@ -483,7 +551,7 @@ public class MainActivity extends AppCompatActivity {
             // NFT delivery — order lines that carry an NFT tokenid (from an NFT Studio .shop)
             List<String[]> nfts = nftLines(o);
             if (!nfts.isEmpty()) {
-                body.addView(sectionLabel("NFT delivery"));
+                body.addView(sectionLabel(autoDeliverOn() ? "NFT delivery · automatic" : "NFT delivery"));
                 for (String[] line : nfts) body.addView(nftSendRow(o, line));
             }
         }
@@ -515,7 +583,9 @@ public class MainActivity extends AppCompatActivity {
         return wrap;
     }
 
-    private void advanceStatus(final MerchDb.Order o, final String status) {
+    private void advanceStatus(final MerchDb.Order o, final String status) { advanceStatus(o, status, false); }
+
+    private void advanceStatus(final MerchDb.Order o, final String status, final boolean quiet) {
         io.execute(() -> {
             db.setStatus(o.ref, status);
             // notify the buyer
@@ -526,13 +596,24 @@ public class MainActivity extends AppCompatActivity {
                 @Override public void onSent(String txid) {}
                 @Override public void onFailed(String e) {}
             });
-            ui.post(() -> { toast("Marked " + status); refreshTop(buildOrderDetail(o.ref)); });
+            ui.post(() -> { if (!quiet) toast("Marked " + status); refreshOrderIfTopmost(o.ref); });
         });
+    }
+
+    /** Refresh only the screen the vendor is actually looking at — never yank navigation from
+     *  a background event (auto-delivery, scans). Same pattern as onScanDone. */
+    private void refreshOrderIfTopmost(String ref) {
+        View top = stack.peek();
+        Object tag = top == null ? null : top.getTag();
+        if (tag instanceof String && tag.equals("order:" + ref)) refreshTop(buildOrderDetail(ref));
+        else if (stack.size() == 1) refreshTop(buildOrders());
     }
 
     // ---- NFT delivery ----
 
-    /** Order lines carrying an NFT tokenid, as {name, tokenid, quantity}. Empty on plain orders. */
+    /** Order lines carrying an NFT tokenid, as {name, tokenid, quantity, stateIdx}. stateIdx "0" =
+     *  plain NFT (delivered via `send`); ≥1 = a StateNFT piece (state-replay transfer of the exact
+     *  coin whose state port 0 equals it). Empty on plain orders. */
     private List<String[]> nftLines(MerchDb.Order o) {
         List<String[]> out = new ArrayList<>();
         if (o == null || o.items == null || o.items.isEmpty()) return out;
@@ -543,35 +624,46 @@ public class MainActivity extends AppCompatActivity {
                 String tokenid = it.optString("nftTokenId", "");
                 if (tokenid.isEmpty()) continue;
                 int q = Math.max(1, it.optInt("quantity", 1));
-                out.add(new String[]{it.optString("product", "NFT"), tokenid, String.valueOf(q)});
+                int idx = Math.max(0, it.optInt("nftStateIdx", 0));
+                out.add(new String[]{it.optString("product", "NFT"), tokenid, String.valueOf(q), String.valueOf(idx)});
             }
         } catch (Exception ignored) {}
         return out;
     }
 
+    /** Meta/set key for one deliverable line. Plain NFTs keep the historical ref:tokenid shape (so
+     *  existing nftsent: metas survive); pieces append #idx — two pieces of one collection in one
+     *  order stay distinct. */
+    private static String lineKey(String ref, String[] line) {
+        return ref + ":" + line[1] + ("0".equals(line[3]) ? "" : "#" + line[3]);
+    }
+
     private View nftSendRow(final MerchDb.Order o, final String[] line) {
         final String name = line[0], tokenid = line[1], qty = line[2];
-        String sentTx = db.getMeta("nftsent:" + o.ref + ":" + tokenid, "");
+        final boolean piece = !"0".equals(line[3]);
+        final String key = lineKey(o.ref, line);
+        final String label = piece ? "\"" + name + "\"" : qty + " × " + name;
+        String sentTx = db.getMeta("nftsent:" + key, "");
         if (!sentTx.isEmpty()) {
             TextView t = new TextView(this);
-            t.setText("✓ Sent " + qty + " × " + name + ("sent".equals(sentTx) ? "" : " · " + shortId(sentTx)));
+            t.setText("✓ Sent " + label + (("sent".equals(sentTx) || "posted".equals(sentTx)) ? "" : " · " + shortId(sentTx)));
             t.setTextColor(Design.IN); t.setTextSize(13f); t.setPadding(0, dp(4), 0, dp(4));
             return t;
         }
         LinearLayout wrap = new LinearLayout(this); wrap.setOrientation(LinearLayout.VERTICAL);
         boolean ready = o.paid && o.payaddr != null && !o.payaddr.isEmpty();
-        boolean inFlight = nftSending.contains(o.ref + ":" + tokenid);
-        TextView b = button(inFlight ? "Sending…" : "Send " + qty + " × " + name + " to buyer", ready && !inFlight);
+        boolean inFlight = nftSending.contains(key);
+        TextView b = button(inFlight ? "Sending…" : "Send " + label + " to buyer", ready && !inFlight);
         LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
         lp.topMargin = dp(6); b.setLayoutParams(lp);
         b.setOnClickListener(v -> {
             if (!o.paid) { toast("Awaiting payment first."); return; }
             if (o.payaddr == null || o.payaddr.isEmpty()) { toast("This order carries no buyer pay address."); return; }
-            if (nftSending.contains(o.ref + ":" + tokenid)) return;
+            if (nftSending.contains(key)) return;
             new AlertDialog.Builder(this)
                     .setTitle("Send NFT")
-                    .setMessage("Send " + qty + " × " + name + " (" + shortId(tokenid) + ") to " + shortId(o.payaddr) + "?\n\nThis transfers the NFT on-chain.")
-                    .setPositiveButton("Send", (d, w) -> sendNft(o, name, tokenid, qty))
+                    .setMessage("Send " + label + " (" + shortId(tokenid) + ") to " + shortId(o.payaddr) + "?\n\nThis transfers the NFT on-chain.")
+                    .setPositiveButton("Send", (d, w) -> sendNft(o, line, false))
                     .setNegativeButton("Cancel", null)
                     .show();
         });
@@ -585,40 +677,202 @@ public class MainActivity extends AppCompatActivity {
         return wrap;
     }
 
-    /** The node's `send` builds+posts atomically — on failure nothing is left behind (no txndelete
-     *  needed) and we write no state, so the button simply re-enables for a retry. */
-    private void sendNft(final MerchDb.Order o, final String name, final String tokenid, final String qty) {
-        final String key = o.ref + ":" + tokenid;
+    /** Deliver one order line. StateNFT pieces (stateIdx ≥ 1) transfer the exact coin with its state
+     *  replayed; plain NFTs go via `send` (atomic, mark-on-post). auto=true is the headless
+     *  payment-confirmed path: no toasts, notifications instead, refresh only if visible. */
+    private void sendNft(final MerchDb.Order o, final String[] line, final boolean auto) {
+        final String tokenid = line[1], qty = line[2];
+        final String key = lineKey(o.ref, line);
+        // The pay address is buyer-supplied chain data interpolated into a node command — validate hard.
+        if (!Util.isValidAddress(o.payaddr)) { deliverFailed(o, key, "buyer pay address is malformed", auto); return; }
+        if (!Util.isValidHexId(tokenid)) { deliverFailed(o, key, "token id is malformed", auto); return; }
+        if (!"0".equals(line[3])) { stateNftDeliver(o, line, auto); return; }
+
         if (!nftSending.add(key)) return;
-        refreshTop(buildOrderDetail(o.ref));
+        refreshOrderIfTopmost(o.ref);
         CommsTransport.sendPayment(node, o.payaddr, qty, tokenid, o.ref, new CommsTransport.SendCb() {
             @Override public void onSent(final String txid) {
-                io.execute(() -> {
-                    db.setMeta("nftsent:" + o.ref + ":" + tokenid, txid == null || txid.isEmpty() ? "sent" : txid);
-                    MerchDb.Order fresh = db.order(o.ref);
-                    boolean all = fresh != null;
-                    if (fresh != null) for (String[] l : nftLines(fresh)) {
-                        if (db.getMeta("nftsent:" + o.ref + ":" + l[1], "").isEmpty()) { all = false; break; }
-                    }
-                    final boolean advance = all
-                            && (MerchDb.PAID.equals(fresh.status) || MerchDb.CONFIRMED.equals(fresh.status));
-                    final MerchDb.Order forStatus = fresh;
-                    ui.post(() -> {
-                        nftSending.remove(key);
-                        toast("NFT sent to the buyer");
-                        if (advance) advanceStatus(forStatus, MerchDb.SHIPPED);
-                        else refreshTop(buildOrderDetail(o.ref));
-                    });
-                });
+                markSentAndMaybeAdvance(o, key, txid == null || txid.isEmpty() ? "sent" : txid, auto);
             }
             @Override public void onFailed(final String e) {
-                ui.post(() -> {
-                    nftSending.remove(key);
-                    toast("NFT send failed: " + e);
-                    refreshTop(buildOrderDetail(o.ref));
-                });
+                // A StateNFT collection sold by an old .shop has no edition index — `send` fails with
+                // an opaque sendable:0; name the real cause for the vendor.
+                if (isKnownStateCollection(tokenid)) deliverFailed(o, key, "this is a StateNFT collection but the order names no edition — the buyer's miniMall is outdated", auto);
+                else deliverFailed(o, key, e, auto);
             }
         });
+    }
+
+    // ---- StateNFT piece delivery (state-replay transfer, confirm by coin departure) ----
+
+    /** Tokenids whose script fingerprints as a StateNFT collection (memoized). */
+    private final java.util.HashMap<String, Boolean> stateNftScripts = new java.util.HashMap<>();
+    /** Serial txn queue: build/sign/post grinds PoW — never run two at once on a phone. */
+    private final ArrayDeque<Runnable> txQueue = new ArrayDeque<>();
+    private boolean txBusy = false;
+
+    private boolean isKnownStateCollection(String tokenid) {
+        Boolean b = stateNftScripts.get(tokenid);
+        if (b == null && Util.isValidHexId(tokenid)) {
+            node.cmd("tokens tokenid:" + tokenid, new NodeApi.Cb() {
+                @Override public void onResult(JSONObject j) {
+                    Object resp = j.opt("response");
+                    JSONObject tok = resp instanceof JSONObject ? (JSONObject) resp
+                            : (resp instanceof JSONArray && ((JSONArray) resp).length() > 0 ? ((JSONArray) resp).optJSONObject(0) : null);
+                    if (tok != null) stateNftScripts.put(tokenid, StateNft.isStateNftScript(tok.optString("script", "")));
+                }
+                @Override public void onError(String m) {}
+            });
+        }
+        return b != null && b;
+    }
+
+    private void enqueueTx(Runnable job) {
+        txQueue.add(job);
+        pumpTxQueue();
+    }
+    private void pumpTxQueue() {
+        if (txBusy) return;
+        Runnable job = txQueue.poll();
+        if (job == null) return;
+        txBusy = true;
+        job.run();
+    }
+    private void txDone() { txBusy = false; pumpTxQueue(); }
+
+    private void deliverFailed(MerchDb.Order o, String key, String msg, boolean auto) {
+        nftSending.remove(key);
+        if (auto) notifyDelivery(o.ref, false, msg);
+        else toast("NFT send failed: " + msg);
+        refreshOrderIfTopmost(o.ref);
+    }
+
+    private void markSentAndMaybeAdvance(final MerchDb.Order o, final String key, final String txid, final boolean auto) {
+        io.execute(() -> {
+            db.setMeta("nftsent:" + key, txid == null || txid.isEmpty() ? "sent" : txid);
+            MerchDb.Order fresh = db.order(o.ref);
+            boolean all = fresh != null;
+            if (fresh != null) for (String[] l : nftLines(fresh)) {
+                if (db.getMeta("nftsent:" + lineKey(o.ref, l), "").isEmpty()) { all = false; break; }
+            }
+            final boolean advance = all
+                    && (MerchDb.PAID.equals(fresh.status) || MerchDb.CONFIRMED.equals(fresh.status));
+            final MerchDb.Order forStatus = fresh;
+            ui.post(() -> {
+                nftSending.remove(key);
+                if (auto) notifyDelivery(o.ref, true, txid);
+                else toast("NFT sent to the buyer");
+                if (advance) advanceStatus(forStatus, MerchDb.SHIPPED, auto);
+                else refreshOrderIfTopmost(o.ref);
+            });
+        });
+    }
+
+    /** Transfer the exact coin carrying edition #idx to the buyer, replaying every state port, then
+     *  confirm by watching the coin LEAVE the UTXO set — `txnpost status:true` is not proof for a
+     *  manual script-token txn (the statenft-suite hard rule). Only then does the line mark sent. */
+    private void stateNftDeliver(final MerchDb.Order o, final String[] line, final boolean auto) {
+        final String name = line[0], tokenid = line[1], idx = line[3];
+        final String key = lineKey(o.ref, line);
+        if (!idx.matches("^[1-9][0-9]*$")) { deliverFailed(o, key, "bad edition index", auto); return; }
+        if (!nftSending.add(key)) return;
+        refreshOrderIfTopmost(o.ref);
+        node.cmd("coins relevant:true tokenid:" + tokenid, new NodeApi.Cb() {
+            @Override public void onResult(JSONObject j) {
+                JSONObject coin = null;
+                JSONArray arr = j.optJSONArray("response");
+                if (arr != null) for (int i = 0; i < arr.length(); i++) {
+                    JSONObject c = arr.optJSONObject(i);
+                    if (c != null && idx.equals(StateNft.stamped(c))) { coin = c; break; }
+                }
+                if (coin == null) {
+                    // Coin gone. If WE posted the transfer earlier, its departure IS the delivery.
+                    String posted = db.getMeta("nftposted:" + key, "");
+                    if (!posted.isEmpty()) { markSentAndMaybeAdvance(o, key, posted, auto); return; }
+                    deliverFailed(o, key, "piece #" + idx + " of " + name + " is not in this wallet — sold or moved?", auto);
+                    return;
+                }
+                if (!Util.isValidHexId(coin.optString("coinid", "")) || !StateNft.replayableState(coin)
+                        || StateNft.safeAmount(coin).isEmpty()) {
+                    deliverFailed(o, key, "piece #" + idx + " carries state this app won't replay", auto);
+                    return;
+                }
+                final JSONObject theCoin = coin;
+                enqueueTx(() -> runStateTransfer(o, key, tokenid, theCoin, auto));
+            }
+            @Override public void onError(String m) {
+                deliverFailed(o, key, NodeApi.ERR_TOO_LONG.equals(m) ? "coin list too large for this node" : m, auto);
+            }
+        });
+    }
+
+    private void runStateTransfer(final MerchDb.Order o, final String key, final String tokenid,
+                                  final JSONObject coin, final boolean auto) {
+        final String coinid = coin.optString("coinid", "");
+        // Deterministic txn id per coin: the pre-clean txndelete in transferCommands recovers from
+        // a previous abnormal exit instead of failing txncreate on the stale txn.
+        final String hex = coinid.replaceFirst("(?i)^0x", "");
+        final String txn = "md" + hex.substring(0, Math.min(10, hex.length()));
+        List<String> cmds = StateNft.transferCommands(txn, tokenid, coin, o.payaddr);
+        CmdChain.run(node, cmds, "txndelete id:" + txn, new CmdChain.Done() {
+            @Override public void ok(JSONObject last) {
+                node.cmd("txndelete id:" + txn, new NodeApi.Cb() {
+                    @Override public void onResult(JSONObject j) {}
+                    @Override public void onError(String m) {}
+                });
+                String txid = last == null ? "" : last.optString("txpowid", "");
+                if (txid.isEmpty() && last != null) {
+                    JSONObject r = last.optJSONObject("response");
+                    if (r != null) txid = r.optString("txpowid", "");
+                }
+                final String postedVal = txid.isEmpty() ? "posted" : txid;
+                io.execute(() -> db.setMeta("nftposted:" + key, postedVal));
+                txDone();
+                watchDeparture(o, key, tokenid, coinid, postedVal, auto, 0);
+            }
+            @Override public void fail(String message) {
+                txDone();
+                deliverFailed(o, key, message, auto);
+            }
+        });
+    }
+
+    private static final long WATCH_INTERVAL_MS = 20000;
+    private static final int WATCH_TRIES = 20;   // ~6.7 minutes
+
+    /** Poll until the input coin leaves the UTXO set (delivery confirmed) or we give up for now.
+     *  On timeout the line stays unsent + nftposted stays set — a later retry (or next app open)
+     *  finds the coin gone and marks it sent, or finds it still here and reposts. */
+    private void watchDeparture(final MerchDb.Order o, final String key, final String tokenid,
+                                final String coinid, final String postedVal, final boolean auto, final int attempt) {
+        if (isFinishing() || isDestroyed()) return;
+        if (attempt >= WATCH_TRIES) {
+            nftSending.remove(key);
+            if (auto) notifyDelivery(o.ref, false, o.ref + " — transfer posted but unconfirmed; open the order to retry");
+            else toast("Transfer posted but not yet confirmed — retry later from the order.");
+            refreshOrderIfTopmost(o.ref);
+            return;
+        }
+        ui.postDelayed(() -> node.cmd("coins relevant:true tokenid:" + tokenid, new NodeApi.Cb() {
+            @Override public void onResult(JSONObject j) {
+                boolean present = false;
+                JSONArray arr = j.optJSONArray("response");
+                if (arr != null) for (int i = 0; i < arr.length(); i++) {
+                    JSONObject c = arr.optJSONObject(i);
+                    if (c != null && coinid.equals(c.optString("coinid", ""))) { present = true; break; }
+                }
+                if (!present) markSentAndMaybeAdvance(o, key, postedVal, auto);
+                else watchDeparture(o, key, tokenid, coinid, postedVal, auto, attempt + 1);
+            }
+            @Override public void onError(String m) {
+                if (NodeApi.ERR_TOO_LONG.equals(m)) {
+                    // can't confirm on this node — leave unsent, nftposted resolves it later
+                    nftSending.remove(key);
+                    if (auto) notifyDelivery(o.ref, false, o.ref + " — posted; can't confirm on this node");
+                    refreshOrderIfTopmost(o.ref);
+                } else watchDeparture(o, key, tokenid, coinid, postedVal, auto, attempt + 1);
+            }
+        }), WATCH_INTERVAL_MS);
     }
 
     private View replyRow(final MerchDb.Order o) {
@@ -877,6 +1131,21 @@ public class MainActivity extends AppCompatActivity {
                     .setSmallIcon(android.R.drawable.ic_dialog_email)
                     .setContentTitle("New shop activity")
                     .setContentText(n + " new order update(s)")
+                    .setAutoCancel(true);
+            NotificationManagerCompat.from(this).notify(2, b.build());
+        } catch (Exception ignored) {}
+    }
+
+    /** Auto-delivery outcome. Same id as notifyNew so the happy path collapses to ONE visible
+     *  notification: "New shop activity" is replaced by the delivery result seconds later. */
+    private void notifyDelivery(String ref, boolean ok, String detail) {
+        try {
+            if (Build.VERSION.SDK_INT >= 33 && ContextCompat.checkSelfPermission(this, "android.permission.POST_NOTIFICATIONS") != PackageManager.PERMISSION_GRANTED) return;
+            androidx.core.app.NotificationCompat.Builder b = new androidx.core.app.NotificationCompat.Builder(this, CH)
+                    .setSmallIcon(android.R.drawable.ic_dialog_email)
+                    .setContentTitle(ok ? "Payment received" : "NFT delivery failed")
+                    .setContentText(ok ? ref + " paid · NFT sent to the buyer"
+                                       : ref + " — open the order to retry")
                     .setAutoCancel(true);
             NotificationManagerCompat.from(this).notify(2, b.build());
         } catch (Exception ignored) {}

@@ -13,8 +13,15 @@
     <!-- Scan a contact's Mail-key QR. -->
     <uses-permission android:name="android.permission.CAMERA" />
 
+    <!-- allowBackup=false is a FUND-SAFETY setting here, not a preference. With the scaffold default
+         (true + empty rules) Android Auto Backup uploaded this app's whole data directory to the user's
+         cloud and RESTORED it on reinstall — which both exfiltrates the data below and re-plants state a
+         reinstall is supposed to clear. A reinstall must be a true reset.
+         At stake: meta "vendoraddr" — locked on first write and deliberately never refreshed. Restored onto a node the
+         user no longer owns, the vendor keeps publishing that address and BUYER PAYMENTS LAND IN A WALLET
+         THEY CANNOT SPEND. Restored nftsent:/nftposted: flags also mark paid orders as already delivered -->
     <application
-        android:allowBackup="true"
+        android:allowBackup="false"
         android:dataExtractionRules="@xml/data_extraction_rules"
         android:fullBackupContent="@xml/backup_rules"
         android:icon="@mipmap/ic_launcher"

@@ -32,6 +32,17 @@ public final class Util {
         return tokenid == null || MINIMA_TOKENID.equals(tokenid);
     }
 
+    /** A well-formed 0x hex id (tokenid/coinid) — the gate before ANY id is interpolated into a
+     *  node command string (commands are whitespace-parsed; never build one from unvalidated data). */
+    public static boolean isValidHexId(String id) {
+        return id != null && (MINIMA_TOKENID.equals(id) || id.matches("^0x[0-9a-fA-F]{2,64}$"));
+    }
+
+    /** A plain decimal amount — same interpolation guard as {@link #isValidHexId}. */
+    public static boolean isValidAmount(String amt) {
+        return amt != null && amt.matches("^[0-9]+(\\.[0-9]+)?$");
+    }
+
     /**
      * Minima "token name" can be a plain string, or a JSON object {name:..,url:..},
      * or (for raw coin entries) nested. Pull a human-readable name out of whatever we get.

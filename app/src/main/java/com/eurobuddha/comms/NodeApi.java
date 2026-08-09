@@ -32,6 +32,18 @@ public class NodeApi {
 
     /** Returned as the error message when the node says we are not enabled yet. */
     public static final String ERR_NOT_ENABLED = "NOT_ENABLED";
+    /** Returned when the node capped the reply at 256,000 bytes — shrink the query and retry. */
+    public static final String ERR_TOO_LONG = "TOO_LONG";
+
+    /** The node's over-limit stub: {@code status:false} with a String {@code response} containing "too long".
+     *  The node discards any command reply over 256,000 bytes and returns this instead of the data. */
+    private static boolean isTooLong(JSONObject j) {
+        if (j == null || j.optBoolean("status", true)) return false;
+        Object r = j.opt("response");
+        if (!(r instanceof String)) return false;
+        String s = ((String) r).toLowerCase();
+        return s.contains("too long") || s.contains("max(256000)");
+    }
 
     private static final long READ_TIMEOUT_MS = 30000;
     private static final long WRITE_TIMEOUT_MS = 180000;   // build + proof-of-work + post is slow on mobile
@@ -108,7 +120,13 @@ public class NodeApi {
                         if (cb != null) cb.onError(ERR_NOT_ENABLED);
                         return;
                     }
-                    if (cb != null) cb.onResult(zResponse);
+                    if (isTooLong(zResponse)) {
+                        if (cb != null) cb.onError(ERR_TOO_LONG);
+                        return;
+                    }
+                    // Contain callback crashes: one bad handler must not kill the broadcast pipeline.
+                    try { if (cb != null) cb.onResult(zResponse); }
+                    catch (Throwable t) { android.util.Log.e("NodeApi", "callback crashed", t); }
                 });
             }
         });
