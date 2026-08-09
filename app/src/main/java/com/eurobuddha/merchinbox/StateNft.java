@@ -19,6 +19,42 @@ public final class StateNft {
 
     private StateNft() {}
 
+    /**
+     * True for a coin that has been buried — it sits at the graveyard address. The node keeps
+     * returning these from {@code coins relevant:true} after a burial because it still tracks the
+     * coin, so every enumeration must filter them or buried pieces reappear as owned.
+     */
+    public static boolean isBuried(JSONObject coin) {
+        if (coin == null) return false;
+        String a = coin.optString("address", coin.optString("miniaddress", ""));
+        return GRAVEYARD.equalsIgnoreCase(a == null ? "" : a.trim());
+    }
+
+    /** Honest data URI for an embedded plate: plates are WebP now, were JPEG before, may be SVG. */
+    public static String dataUri(String b64) {
+        if (b64 == null || b64.isEmpty()) return "";
+        return "data:" + mimeOf(b64) + ";base64," + b64;
+    }
+
+    public static String mimeOf(String b64) {
+        try {
+            int take = Math.min(b64.length(), 32);
+            take -= take % 4;   // only decode a whole number of base64 quanta
+            byte[] head = android.util.Base64.decode(b64.substring(0, take), android.util.Base64.DEFAULT);
+            if (head.length >= 12 && head[0] == 'R' && head[1] == 'I' && head[2] == 'F' && head[3] == 'F'
+                    && head[8] == 'W' && head[9] == 'E' && head[10] == 'B' && head[11] == 'P') {
+                return "image/webp";
+            }
+            if (head.length >= 2 && (head[0] & 0xFF) == 0xFF && (head[1] & 0xFF) == 0xD8) return "image/jpeg";
+            if (head.length >= 4 && (head[0] & 0xFF) == 0x89 && head[1] == 'P' && head[2] == 'N' && head[3] == 'G') {
+                return "image/png";
+            }
+            String text = new String(head, java.nio.charset.StandardCharsets.UTF_8).trim().toLowerCase();
+            if (text.startsWith("<svg") || text.startsWith("<?xml")) return "image/svg+xml";
+        } catch (Throwable ignored) {}
+        return "image/jpeg";
+    }
+
     public static class Meta {
         public String tokenid = "";
         public String name = "Collection";
@@ -212,8 +248,9 @@ public final class StateNft {
     public static String imageUrl(Meta meta, int idx, JSONObject coin) {
         String embedded = state(coin, 1);
         if (embedded != null && embedded.startsWith("[") && embedded.endsWith("]")) {
-            // ImageTools writes JPEG; labelling it PNG only worked because decoders sniff.
-            return "data:image/jpeg;base64," + embedded.substring(1, embedded.length() - 1);
+            // Sniff the payload rather than assuming: plates are WebP now, were JPEG before, and
+            // may be SVG (artBox Atelier). A hardcoded label is wrong for two of those three.
+            return dataUri(embedded.substring(1, embedded.length() - 1));
         }
         if (meta != null && !meta.base.isEmpty()) return meta.base + idx + (meta.ext == null ? "" : meta.ext);
         // The Inbox never renders piece art — no IconResolver here; the raw icon string suffices.

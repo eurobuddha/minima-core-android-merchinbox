@@ -611,9 +611,10 @@ public class MainActivity extends AppCompatActivity {
 
     // ---- NFT delivery ----
 
-    /** Order lines carrying an NFT tokenid, as {name, tokenid, quantity, stateIdx}. stateIdx "0" =
-     *  plain NFT (delivered via `send`); ≥1 = a StateNFT piece (state-replay transfer of the exact
-     *  coin whose state port 0 equals it). Empty on plain orders. */
+    /** Order lines carrying an NFT tokenid, as {name, tokenid, quantity, stateIdx, bundle}.
+     *  stateIdx "0" + bundle "0" = plain NFT (delivered via `send`); stateIdx ≥1 = a StateNFT piece
+     *  (state-replay transfer of the exact coin); bundle "1" = the COMPLETE collection (every held
+     *  piece, one transfer each). Empty on plain orders. */
     private List<String[]> nftLines(MerchDb.Order o) {
         List<String[]> out = new ArrayList<>();
         if (o == null || o.items == null || o.items.isEmpty()) return out;
@@ -625,24 +626,27 @@ public class MainActivity extends AppCompatActivity {
                 if (tokenid.isEmpty()) continue;
                 int q = Math.max(1, it.optInt("quantity", 1));
                 int idx = Math.max(0, it.optInt("nftStateIdx", 0));
-                out.add(new String[]{it.optString("product", "NFT"), tokenid, String.valueOf(q), String.valueOf(idx)});
+                int bundle = it.optInt("nftBundle", 0) > 0 ? 1 : 0;
+                out.add(new String[]{it.optString("product", "NFT"), tokenid, String.valueOf(q), String.valueOf(idx), String.valueOf(bundle)});
             }
         } catch (Exception ignored) {}
         return out;
     }
 
     /** Meta/set key for one deliverable line. Plain NFTs keep the historical ref:tokenid shape (so
-     *  existing nftsent: metas survive); pieces append #idx — two pieces of one collection in one
-     *  order stay distinct. */
+     *  existing nftsent: metas survive); pieces append #idx; complete-collection bundles #ALL. */
     private static String lineKey(String ref, String[] line) {
+        if ("1".equals(line[4])) return ref + ":" + line[1] + "#ALL";
         return ref + ":" + line[1] + ("0".equals(line[3]) ? "" : "#" + line[3]);
     }
 
     private View nftSendRow(final MerchDb.Order o, final String[] line) {
         final String name = line[0], tokenid = line[1], qty = line[2];
         final boolean piece = !"0".equals(line[3]);
+        final boolean bundle = "1".equals(line[4]);
         final String key = lineKey(o.ref, line);
-        final String label = piece ? "\"" + name + "\"" : qty + " × " + name;
+        final String label = bundle ? "the complete collection (\"" + name + "\")"
+                : piece ? "\"" + name + "\"" : qty + " × " + name;
         String sentTx = db.getMeta("nftsent:" + key, "");
         if (!sentTx.isEmpty()) {
             TextView t = new TextView(this);
@@ -686,6 +690,7 @@ public class MainActivity extends AppCompatActivity {
         // The pay address is buyer-supplied chain data interpolated into a node command — validate hard.
         if (!Util.isValidAddress(o.payaddr)) { deliverFailed(o, key, "buyer pay address is malformed", auto); return; }
         if (!Util.isValidHexId(tokenid)) { deliverFailed(o, key, "token id is malformed", auto); return; }
+        if ("1".equals(line[4])) { collectionDeliver(o, line, auto); return; }
         if (!"0".equals(line[3])) { stateNftDeliver(o, line, auto); return; }
 
         if (!nftSending.add(key)) return;
@@ -783,7 +788,7 @@ public class MainActivity extends AppCompatActivity {
                 JSONArray arr = j.optJSONArray("response");
                 if (arr != null) for (int i = 0; i < arr.length(); i++) {
                     JSONObject c = arr.optJSONObject(i);
-                    if (c != null && idx.equals(StateNft.stamped(c))) { coin = c; break; }
+                    if (c != null && !StateNft.isBuried(c) && idx.equals(StateNft.stamped(c))) { coin = c; break; }
                 }
                 if (coin == null) {
                     // Coin gone. If WE posted the transfer earlier, its departure IS the delivery.
@@ -835,6 +840,126 @@ public class MainActivity extends AppCompatActivity {
                 deliverFailed(o, key, message, auto);
             }
         });
+    }
+
+    // ---- complete-collection delivery: every held piece, one state-replay transfer each ----
+
+    /** Deliver a whole collection: gather every sendable piece, post one transfer per coin
+     *  (serially — the NFT Wallet's send-collection pattern), then confirm by watching every
+     *  posted coin leave the UTXO set. Retry re-gathers, so a partial delivery resumes where it
+     *  stopped: already-transferred coins are simply gone from the next gather. */
+    private void collectionDeliver(final MerchDb.Order o, final String[] line, final boolean auto) {
+        final String name = line[0], tokenid = line[1];
+        final String key = lineKey(o.ref, line);
+        if (!nftSending.add(key)) return;
+        refreshOrderIfTopmost(o.ref);
+        node.cmd("coins relevant:true tokenid:" + tokenid, new NodeApi.Cb() {
+            @Override public void onResult(JSONObject j) {
+                final List<JSONObject> coins = new ArrayList<>();
+                JSONArray arr = j.optJSONArray("response");
+                if (arr != null) for (int i = 0; i < arr.length(); i++) {
+                    JSONObject c = arr.optJSONObject(i);
+                    if (c == null || !Util.isValidHexId(c.optString("coinid", ""))) continue;
+                    // Same refusals as a single transfer: buried, unstamped (creator bypass live),
+                    // or state this app won't replay.
+                    if (StateNft.isBuried(c) || StateNft.stamped(c) == null
+                            || !StateNft.replayableState(c) || StateNft.safeAmount(c).isEmpty()) continue;
+                    coins.add(c);
+                }
+                if (coins.isEmpty()) {
+                    // Nothing left to send. If WE posted transfers earlier, their departure IS the
+                    // completed delivery; otherwise the collection isn't here.
+                    String posted = db.getMeta("nftposted:" + key, "");
+                    if (!posted.isEmpty()) { markSentAndMaybeAdvance(o, key, posted, auto); return; }
+                    deliverFailed(o, key, "no pieces of " + name + " are in this wallet — sold or moved?", auto);
+                    return;
+                }
+                enqueueTx(() -> bundleTransferNext(o, key, tokenid, coins, 0, new ArrayList<>(), new String[]{null}, auto));
+            }
+            @Override public void onError(String m) {
+                deliverFailed(o, key, NodeApi.ERR_TOO_LONG.equals(m) ? "coin list too large for this node" : m, auto);
+            }
+        });
+    }
+
+    /** Serial per-coin transfer loop — one failure doesn't strand the rest (first error kept). */
+    private void bundleTransferNext(final MerchDb.Order o, final String key, final String tokenid,
+                                    final List<JSONObject> coins, final int i,
+                                    final List<String> postedIds, final String[] firstError, final boolean auto) {
+        if (i >= coins.size()) {
+            txDone();
+            if (postedIds.isEmpty()) {
+                deliverFailed(o, key, firstError[0] == null ? "no transfers could be posted" : firstError[0], auto);
+                return;
+            }
+            io.execute(() -> db.setMeta("nftposted:" + key, "posted"));
+            watchBundleDeparture(o, key, tokenid, postedIds, firstError[0], auto, 0);
+            return;
+        }
+        JSONObject coin = coins.get(i);
+        final String coinid = coin.optString("coinid", "");
+        final String hex = coinid.replaceFirst("(?i)^0x", "");
+        final String txn = "mc" + hex.substring(0, Math.min(10, hex.length()));
+        List<String> cmds = StateNft.transferCommands(txn, tokenid, coin, o.payaddr);
+        CmdChain.run(node, cmds, "txndelete id:" + txn, new CmdChain.Done() {
+            @Override public void ok(JSONObject last) {
+                node.cmd("txndelete id:" + txn, new NodeApi.Cb() {
+                    @Override public void onResult(JSONObject j) {}
+                    @Override public void onError(String m) {}
+                });
+                postedIds.add(coinid);
+                bundleTransferNext(o, key, tokenid, coins, i + 1, postedIds, firstError, auto);
+            }
+            @Override public void fail(String message) {
+                if (firstError[0] == null && message != null && !message.isEmpty()) firstError[0] = message;
+                bundleTransferNext(o, key, tokenid, coins, i + 1, postedIds, firstError, auto);
+            }
+        });
+    }
+
+    /** Wait for every posted coin to leave the UTXO set, then confirm nothing sendable remains. */
+    private void watchBundleDeparture(final MerchDb.Order o, final String key, final String tokenid,
+                                      final List<String> postedIds, final String firstError,
+                                      final boolean auto, final int attempt) {
+        if (isFinishing() || isDestroyed()) return;
+        if (attempt >= WATCH_TRIES) {
+            nftSending.remove(key);
+            if (auto) notifyDelivery(o.ref, false, o.ref + " — transfers posted but unconfirmed; open the order to retry");
+            else toast("Transfers posted but not yet confirmed — retry later from the order.");
+            refreshOrderIfTopmost(o.ref);
+            return;
+        }
+        ui.postDelayed(() -> node.cmd("coins relevant:true tokenid:" + tokenid, new NodeApi.Cb() {
+            @Override public void onResult(JSONObject j) {
+                java.util.HashSet<String> live = new java.util.HashSet<>();
+                int sendableLeft = 0;
+                JSONArray arr = j.optJSONArray("response");
+                if (arr != null) for (int i = 0; i < arr.length(); i++) {
+                    JSONObject c = arr.optJSONObject(i);
+                    if (c == null) continue;
+                    live.add(c.optString("coinid", ""));
+                    if (!StateNft.isBuried(c) && StateNft.stamped(c) != null && StateNft.replayableState(c)) sendableLeft++;
+                }
+                boolean anyPostedLeft = false;
+                for (String id : postedIds) if (live.contains(id)) { anyPostedLeft = true; break; }
+                if (anyPostedLeft) { watchBundleDeparture(o, key, tokenid, postedIds, firstError, auto, attempt + 1); return; }
+                if (sendableLeft == 0) { markSentAndMaybeAdvance(o, key, "posted", auto); return; }
+                // Posted coins confirmed away, but some pieces failed to post — resumable.
+                nftSending.remove(key);
+                String msg = o.ref + " — " + postedIds.size() + " piece(s) delivered, " + sendableLeft + " remain"
+                        + (firstError != null ? " (first error: " + firstError + ")" : "") + " — retry to send the rest";
+                if (auto) notifyDelivery(o.ref, false, msg);
+                else toast(msg);
+                refreshOrderIfTopmost(o.ref);
+            }
+            @Override public void onError(String m) {
+                if (NodeApi.ERR_TOO_LONG.equals(m)) {
+                    nftSending.remove(key);
+                    if (auto) notifyDelivery(o.ref, false, o.ref + " — posted; can't confirm on this node");
+                    refreshOrderIfTopmost(o.ref);
+                } else watchBundleDeparture(o, key, tokenid, postedIds, firstError, auto, attempt + 1);
+            }
+        }), WATCH_INTERVAL_MS);
     }
 
     private static final long WATCH_INTERVAL_MS = 20000;
