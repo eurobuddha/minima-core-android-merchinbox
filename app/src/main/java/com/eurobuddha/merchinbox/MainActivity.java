@@ -60,7 +60,7 @@ import com.eurobuddha.comms.MerchMessage;
 import com.eurobuddha.comms.NodeApi;
 import com.eurobuddha.comms.QrUtil;
 import com.eurobuddha.comms.Sodium;
-import org.minimarex.minimaapi.MinimaAPIMessages;
+import com.eurobuddha.minimaapi.MinimaAPIMessages;
 
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayDeque;
