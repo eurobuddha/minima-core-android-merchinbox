@@ -90,7 +90,14 @@ public class NodeApi {
     }
 
     public void cmd(String command, Cb cb) {
-        if (mReleased) return;
+        mMain.post(() -> cmdOnMain(command, cb));
+    }
+
+    private void cmdOnMain(String command, Cb cb) {
+        if (mReleased) {
+            if (cb != null) cb.onError("Node connection closed.");
+            return;
+        }
         final boolean[] done = {false};
         final Runnable[] ref = new Runnable[1];
         final Runnable timeout = () -> {

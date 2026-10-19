@@ -44,6 +44,13 @@ public final class CommsTransport {
     /** Send a real value PAYMENT to a vendor address; stamp the order ref into state[1] for matching. */
     public static void sendPayment(NodeApi node, String vendorAddress, String amount, String tokenid,
                                    String ref, SendCb cb) {
+        if (vendorAddress == null || !(vendorAddress.matches("^0x[0-9a-fA-F]{2,}$")
+                || vendorAddress.matches("^M[xX][0-9A-Za-z]{30,100}$"))
+                || tokenid == null || !tokenid.matches("^0x[0-9a-fA-F]{2,}$")
+                || amount == null || !amount.matches("[0-9]+(?:\\.[0-9]+)?")) {
+            cb.onFailed("Invalid payment address, token or amount.");
+            return;
+        }
         try {
             JSONObject extra = new JSONObject();
             if (ref != null && !ref.isEmpty()) extra.put("1", "0x" + Hex.to(ref.getBytes(StandardCharsets.UTF_8)));

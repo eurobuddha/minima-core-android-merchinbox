@@ -34,3 +34,19 @@ SHA256: 4e1a783fa4b5190fea9035dc0062fdb582c8bb9cff4d872ffa59a24112ac3f44
 Package/version/family signing certificate verified. Approve this bounded port.
 Physical layout check and remaining delivery/storage parity are still pending.
 No install or publication.
+
+Transport repair checkpoint: 0.5.6/code506
+Reuses scripts/adapt-pandamonium-malls.py payment argument checks and main-handler
+command dispatch with closed-connection rejection. Standalone MinimaAPI retained.
+Reuses PaymentArgumentsTest and NodeApiThreadingTest with package/client imports
+adapted. Valid amounts and order references remain unchanged; malformed command
+arguments cannot reach the node. No live transaction performed.
+Review: inspected complete transport/wrapper, callers and tests; compared final
+diffs against canonical blocks. No blocking finding in these bounded changes.
+Offline tests, signed build and lint passed: 13 tests; 0 lint errors, 66 warnings.
+Added the same real org.json test dependency used by Shop/Studio; Android JSON
+stubs otherwise discarded state in the plain JVM command-construction test.
+Actual package/version/signature/ZIP integrity checked: dist/minimall-inbox-0.5.6-candidate.apk
+SHA256: c323d5ca0735907ec8df58ff37d490a9573128cef9714976c391c832b7e18b9c
+Receipt validation, durable sends/retry handling and full parity remain open.
+No installation or publication.
