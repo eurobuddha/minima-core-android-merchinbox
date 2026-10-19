@@ -275,12 +275,14 @@ public class MainActivity extends AppCompatActivity {
     private void askForSeed() {
         final EditText in = input("Your Minima seed phrase");
         in.setMinLines(3);
-        new AlertDialog.Builder(this)
+        AlertDialog seedDialog = new AlertDialog.Builder(this)
                 .setTitle("Create your shop identity")
                 .setMessage("Your shop key is derived from your Minima seed (recoverable, distinct from other apps). Paste your seed phrase once — it's used only to derive the key and is never stored.")
                 .setView(in)
                 .setPositiveButton("Create", (d, w) -> { String s = in.getText().toString().trim(); if (!s.isEmpty()) deriveIdentity(s); })
-                .show();
+                .create();
+        seedDialog.getWindow().addFlags(android.view.WindowManager.LayoutParams.FLAG_SECURE);
+        seedDialog.show();
     }
 
     // ---- scanning + routing ----
@@ -582,14 +584,17 @@ public class MainActivity extends AppCompatActivity {
 
     private View statusButtons(final MerchDb.Order o) {
         LinearLayout wrap = new LinearLayout(this);
-        wrap.setOrientation(LinearLayout.HORIZONTAL);
+        wrap.setOrientation(LinearLayout.VERTICAL);
+        LinearLayout actionRow = null;
+        int actionIndex = 0;
         String[] flow = {MerchDb.PAID, MerchDb.CONFIRMED, MerchDb.SHIPPED, MerchDb.DELIVERED};
         for (final String s : flow) {
+            if (actionIndex++ % 2 == 0) { actionRow = new LinearLayout(this); actionRow.setOrientation(LinearLayout.HORIZONTAL); wrap.addView(actionRow); }
             TextView b = button(s, s.equals(o.status));
             LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
             lp.rightMargin = dp(6); b.setLayoutParams(lp);
             b.setOnClickListener(v -> advanceStatus(o, s));
-            wrap.addView(b);
+            actionRow.addView(b);
         }
         return wrap;
     }
@@ -1222,6 +1227,8 @@ public class MainActivity extends AppCompatActivity {
     }
     private TextView iconBtn(String glyph, Runnable onClick) {
         TextView b = new TextView(this); b.setText(glyph); b.setTextColor(Design.TEXT); b.setTextSize(22f);
+        b.setContentDescription("‹".equals(glyph) ? "Back" : "⤓".equals(glyph) ? "Export orders" : "Vendor card");
+        b.setMinWidth(dp(48)); b.setMinHeight(dp(48));
         b.setGravity(Gravity.CENTER); b.setPadding(dp(10), dp(2), dp(10), dp(2));
         b.setOnClickListener(v -> onClick.run());
         return b;

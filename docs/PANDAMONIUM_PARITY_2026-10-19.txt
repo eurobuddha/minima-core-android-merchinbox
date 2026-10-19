@@ -22,3 +22,15 @@ Certificate SHA256: eca1383c9d27683a281fbe6355356267877dc2dd14d963d7cc289ca0700e
 Review verdict: approve this bounded port. Full delivery journal/evidence/storage,
 other asynchronous identity work, presentation parity and device checks remain.
 No installation or publication. Final rollout remains held for the Fold check.
+
+Presentation parity checkpoint: 0.5.5 / code 505
+Reuses adapt-pandamonium-mall-inbox-languages.py's two-row status actions,
+48dp labelled icons, secondary-text contrast, fixed dark dialog themes and seed
+FLAG_SECURE. Copies generated theme values with only host resource prefixes removed.
+Reviewed changed UI helpers/callers, theme values and existing seed flow.
+9 regression tests pass; offline signed build/lint pass (0 errors, 64 warnings).
+Candidate: dist/minimall-inbox-0.5.5-candidate.apk
+SHA256: 4e1a783fa4b5190fea9035dc0062fdb582c8bb9cff4d872ffa59a24112ac3f44
+Package/version/family signing certificate verified. Approve this bounded port.
+Physical layout check and remaining delivery/storage parity are still pending.
+No install or publication.
