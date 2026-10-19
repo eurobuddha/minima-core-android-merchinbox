@@ -1,0 +1,24 @@
+Standalone MiniMall Inbox parity checkpoint: 0.5.4 / code 504
+
+Reuses Pandamonium scripts/pandamonium-sources/merchinbox/ReplyDrafts.java unchanged
+and the sendReply/refresh lifecycle fixes from adapt-pandamonium-inbox-drafts.py.
+Standalone adaptation: comms package names and English UI messages only. Existing
+IPC, database identity/schema and transport remain intact.
+Drafts retain exact text/selection per order through view rebuilds and saved state;
+focused composition defers refresh. A failed local save keeps the draft and does
+not send. Duplicate taps cannot enqueue another save. Late callbacks cannot erase
+a newer draft or navigate away from another open order.
+The existing Mail/Studio optional-camera declaration also resolves a pre-existing
+manifest lint error. No payment, NFT transfer or external message was sent in tests.
+
+Validation/review
+Read complete ReplyDrafts, tests, storage/transport dependencies and all changed
+activity methods/callers/configuration. Reused real EditText and mocked callback
+tests: 9 tests, 0 failures/errors/skips. Offline signed release build passes.
+Lint: 0 errors, 64 warnings. Package/version and family certificate verified.
+Candidate: dist/minimall-inbox-0.5.4-candidate.apk
+SHA256: 32b607e3f32ee72da753dbd4cf594475735b1ebb4b3367b1682b763925cc88dc
+Certificate SHA256: eca1383c9d27683a281fbe6355356267877dc2dd14d963d7cc289ca0700e517f
+Review verdict: approve this bounded port. Full delivery journal/evidence/storage,
+other asynchronous identity work, presentation parity and device checks remain.
+No installation or publication. Final rollout remains held for the Fold check.

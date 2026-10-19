@@ -12,6 +12,7 @@
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <!-- Scan a contact's Mail-key QR. -->
     <uses-permission android:name="android.permission.CAMERA" />
+    <uses-feature android:name="android.hardware.camera" android:required="false" />
 
     <!-- allowBackup=false is a FUND-SAFETY setting here, not a preference. With the scaffold default
          (true + empty rules) Android Auto Backup uploaded this app's whole data directory to the user's

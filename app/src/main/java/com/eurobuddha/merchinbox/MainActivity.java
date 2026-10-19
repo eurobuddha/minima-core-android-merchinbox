@@ -74,6 +74,7 @@ public class MainActivity extends AppCompatActivity {
 
     private static final String CH = "merchinbox";
 
+    private final ReplyDrafts replyDrafts = new ReplyDrafts();
     private LazySodium ls;
     private NodeApi node;
     private MerchDb db;
@@ -109,6 +110,7 @@ public class MainActivity extends AppCompatActivity {
 
     @Override protected void onCreate(Bundle b) {
         super.onCreate(b);
+        replyDrafts.restore(b);
         ls = Sodium.get();
         db = new MerchDb(this);
         shopName = loadShopName();
@@ -130,6 +132,10 @@ public class MainActivity extends AppCompatActivity {
                 uri -> { if (uri != null) writeCsv(uri); });
 
         showOrders();
+        if (b != null) {
+            String orderRef = b.getString("mall.openOrder", "");
+            if (!orderRef.isEmpty() && db.order(orderRef) != null) push(buildOrderDetail(orderRef));
+        }
 
         node = new NodeApi(this, this::onPaired);
         notifyReceiver = new BroadcastReceiver() {
@@ -144,7 +150,15 @@ public class MainActivity extends AppCompatActivity {
                 new IntentFilter(MinimaAPIMessages.MINIMA_API_NOTIFY), ContextCompat.RECEIVER_EXPORTED);
     }
 
+    @Override protected void onSaveInstanceState(Bundle state) {
+        replyDrafts.save(state);
+        View top = stack.peek(); Object tag = top == null ? null : top.getTag();
+        if (tag instanceof String && ((String) tag).startsWith("order:")) state.putString("mall.openOrder", ((String) tag).substring(6));
+        super.onSaveInstanceState(state);
+    }
+
     @Override protected void onDestroy() {
+        replyDrafts.close();
         super.onDestroy();
         if (notifyReceiver != null) try { unregisterReceiver(notifyReceiver); } catch (Exception ignored) {}
         if (node != null) node.onDestroy();
@@ -234,7 +248,7 @@ public class MainActivity extends AppCompatActivity {
             try {
                 byte[] seed = ikm.startsWith("0x") ? Hex.from(ikm) : ikm.getBytes(StandardCharsets.UTF_8);
                 CommsIdentity id = CommsIdentity.fromSeed(ls, seed);
-                ui.post(() -> { adoptIdentity(id); refreshTop(buildOrders()); requestScan(); });
+                ui.post(() -> { adoptIdentity(id); refreshVisibleOrderOrList(); requestScan(); });
             } catch (Exception e) { ui.post(() -> toast("Identity error: " + e.getMessage())); }
         });
     }
@@ -322,10 +336,7 @@ public class MainActivity extends AppCompatActivity {
             }
             if (newCount <= 0) return;
             notifyNew(newCount);
-            View top = stack.peek();
-            Object tag = top == null ? null : top.getTag();
-            if (stack.size() == 1) refreshTop(buildOrders());
-            else if (tag instanceof String && ((String) tag).startsWith("order:")) refreshTop(buildOrderDetail(((String) tag).substring(6)));
+            refreshVisibleOrderOrList();
         });
     }
 
@@ -603,9 +614,19 @@ public class MainActivity extends AppCompatActivity {
     /** Refresh only the screen the vendor is actually looking at — never yank navigation from
      *  a background event (auto-delivery, scans). Same pattern as onScanDone. */
     private void refreshOrderIfTopmost(String ref) {
+        if (isFinishing() || isDestroyed()) return;
         View top = stack.peek();
         Object tag = top == null ? null : top.getTag();
-        if (tag instanceof String && tag.equals("order:" + ref)) refreshTop(buildOrderDetail(ref));
+        if (tag instanceof String && tag.equals("order:" + ref)) {
+            if (!replyDrafts.defer(ref)) refreshTop(buildOrderDetail(ref));
+        }
+        else if (stack.size() == 1) refreshTop(buildOrders());
+    }
+
+    private void refreshVisibleOrderOrList() {
+        if (isFinishing() || isDestroyed()) return;
+        View top = stack.peek(); Object tag = top == null ? null : top.getTag();
+        if (tag instanceof String && ((String) tag).startsWith("order:")) refreshOrderIfTopmost(((String) tag).substring(6));
         else if (stack.size() == 1) refreshTop(buildOrders());
     }
 
@@ -1013,32 +1034,50 @@ public class MainActivity extends AppCompatActivity {
         }
         LinearLayout bar = new LinearLayout(this); bar.setOrientation(LinearLayout.HORIZONTAL); bar.setPadding(0, dp(6), 0, 0);
         final EditText box = input("Reply…");
+        replyDrafts.bind(o.ref, box, () -> refreshOrderIfTopmost(o.ref));
         box.setLayoutParams(new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
         TextView send = button("Send", false);
         send.setOnClickListener(v -> {
-            String txt = box.getText().toString().trim();
-            if (txt.isEmpty()) return;
-            box.setText("");
-            sendReply(o, txt);
+            if (crypto == null || myId == null) { toast("Connect to your node first."); return; }
+            ReplyDrafts.Submission ticket = replyDrafts.begin(o.ref);
+            if (ticket != null) sendReply(o, ticket);
         });
         bar.addView(box); bar.addView(send);
         wrap.addView(bar);
         return wrap;
     }
 
-    private void sendReply(final MerchDb.Order o, final String text) {
+    private void sendReply(final MerchDb.Order o, final ReplyDrafts.Submission ticket) {
         final String rid = MailText.randomId();
-        io.execute(() -> {
-            db.insertChat(o.ref, false, text, rid, System.currentTimeMillis());
-            MerchMessage m = new MerchMessage();
-            m.type = MerchMessage.REPLY; m.ref = o.ref; m.message = text;
-            m.from = myId; m.to = o.counterparty; m.randomid = rid; m.date = System.currentTimeMillis();
-            CommsTransport.sendMessage(node, crypto, o.counterparty, m.toWire(), new CommsTransport.SendCb() {
-                @Override public void onSent(String txid) {}
-                @Override public void onFailed(String e) { ui.post(() -> toast("Reply failed: " + e)); }
+        final String text = ticket.text();
+        try {
+            io.execute(() -> {
+                try {
+                    if (!db.insertChat(o.ref, false, text, rid, System.currentTimeMillis())) throw new IllegalStateException("Reply not saved");
+                } catch (RuntimeException unavailable) {
+                    ui.post(() -> replySaveFailed(ticket));
+                    return;
+                }
+                MerchMessage m = new MerchMessage();
+                m.type = MerchMessage.REPLY; m.ref = o.ref; m.message = text;
+                m.from = myId; m.to = o.counterparty; m.randomid = rid; m.date = System.currentTimeMillis();
+                CommsTransport.sendMessage(node, crypto, o.counterparty, m.toWire(), new CommsTransport.SendCb() {
+                    @Override public void onSent(String txid) {}
+                    @Override public void onFailed(String e) { ui.post(() -> {
+                        if (!isFinishing() && !isDestroyed()) toast("Reply failed: " + e);
+                    }); }
+                });
+                ui.post(() -> {
+                    if (isFinishing() || isDestroyed()) return;
+                    replyDrafts.saved(ticket);
+                    refreshOrderIfTopmost(o.ref);
+                });
             });
-            ui.post(() -> refreshTop(buildOrderDetail(o.ref)));
-        });
+        } catch (java.util.concurrent.RejectedExecutionException closed) { replySaveFailed(ticket); }
+    }
+    private void replySaveFailed(ReplyDrafts.Submission ticket) {
+        replyDrafts.failed(ticket);
+        if (!isFinishing() && !isDestroyed()) toast("Reply could not be saved. Your draft is still here.");
     }
 
     // ---- CSV export ----
