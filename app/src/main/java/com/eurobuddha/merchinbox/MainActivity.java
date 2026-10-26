@@ -1,5 +1,6 @@
 package com.eurobuddha.merchinbox;
 
+import com.eurobuddha.minimaapi.MinimaAPI;
 import android.app.NotificationChannel;
 import android.app.NotificationManager;
 import android.content.BroadcastReceiver;
@@ -141,13 +142,13 @@ public class MainActivity extends AppCompatActivity {
         notifyReceiver = new BroadcastReceiver() {
             @Override public void onReceive(Context c, Intent i) {
                 try {
-                    String event = new JSONObject(i.getStringExtra(MinimaAPIMessages.MINIMA_API_NOTIFY_DATA)).optString("event", "");
+                    String event = new JSONObject(MinimaAPI.notifyData(i)).optString("event", "");
                     if ("NEWBLOCK".equals(event) || "NEWBALANCE".equals(event)) { fetchBlock(); requestScan(); }
                 } catch (Exception ignored) {}
             }
         };
         ContextCompat.registerReceiver(this, notifyReceiver,
-                new IntentFilter(MinimaAPIMessages.MINIMA_API_NOTIFY), ContextCompat.RECEIVER_EXPORTED);
+                MinimaAPI.notifyFilter(), ContextCompat.RECEIVER_EXPORTED);
     }
 
     @Override protected void onSaveInstanceState(Bundle state) {
