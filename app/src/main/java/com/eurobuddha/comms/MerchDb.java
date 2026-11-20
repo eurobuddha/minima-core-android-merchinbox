@@ -111,6 +111,19 @@ public class MerchDb extends SQLiteOpenHelper implements CommsScanner.MetaStore 
                 ContentValues f = new ContentValues(); f.put("k", "mismatch:" + m.ref); f.put("v", "1");
                 db.insertWithOnConflict(META, null, f, SQLiteDatabase.CONFLICT_REPLACE);
             }
+            if (id != -1 && MerchMessage.validNonce(m.nonce)) {   // the order's secret, kept with the row it came with
+                ContentValues f = new ContentValues(); f.put("k", "nonce:" + m.ref); f.put("v", m.nonce);
+                db.insertWithOnConflict(META, null, f, SQLiteDatabase.CONFLICT_REPLACE);
+            }
+            if (id == -1 && "seller".equals(role) && MerchMessage.ORDER.equals(m.type)) {
+                // A second ORDER with a ref already stored (security review H1: a ref is public once paid). If it is
+                // not the same order (buyer key, items, buyer address), the ref is flagged; nothing is sent for it.
+                Order old = order(m.ref);
+                if (old != null && (!eq(old.counterparty, m.from) || !eq(old.items, m.items) || !eq(old.payaddr, m.buyerPayaddr))) {
+                    ContentValues f = new ContentValues(); f.put("k", "conflict:" + m.ref); f.put("v", "1");
+                    db.insertWithOnConflict(META, null, f, SQLiteDatabase.CONFLICT_REPLACE);
+                }
+            }
             db.setTransactionSuccessful();
             return id != -1;
         } finally { db.endTransaction(); }
@@ -157,8 +170,17 @@ public class MerchDb extends SQLiteOpenHelper implements CommsScanner.MetaStore 
      * already PAID, or this coin counted before.
      */
     public String recordPayment(String ref, String coinid, String paidAmount, String paidTokenid) {
+        return recordPayment(ref, coinid, paidAmount, paidTokenid, null);
+    }
+
+    /** As above; {@code coinCommitment} is the coin's state port 2. An order that came with a secret
+     *  ({@link #nonce}) counts only coins carrying its commitment (MerchMessage.commitment): any other coin with
+     *  its ref is not its payment (returns null, nothing counted). */
+    public String recordPayment(String ref, String coinid, String paidAmount, String paidTokenid, String coinCommitment) {
         Order o = order(ref);
         if (o == null || o.paid || coinid == null || coinid.isEmpty()) return null;
+        String n = nonce(o);
+        if (!n.isEmpty() && (coinCommitment == null || !MerchMessage.commitment(n).equalsIgnoreCase(coinCommitment))) return null;
         String counted = "paycoin:" + coinid.toLowerCase(java.util.Locale.ROOT);
         if (!getMeta(counted, "").isEmpty()) return null;
         String want = MerchMessage.tokenFor(o.currency);
@@ -216,6 +238,14 @@ public class MerchDb extends SQLiteOpenHelper implements CommsScanner.MetaStore 
         getWritableDatabase().update(ORD, v, "ref=?", new String[]{ref});
     }
 
+    /** A second, different ORDER arrived with this order's ref (H1): nothing is sent for it. */
+    public boolean conflict(Order o) { return o != null && "1".equals(getMeta("conflict:" + o.ref, "")); }
+
+    /** The secret this order came with ("" for orders from Shops before the commitment). */
+    public String nonce(Order o) { return o == null ? "" : getMeta("nonce:" + o.ref, ""); }
+
+    private static boolean eq(String a, String b) { return (a == null ? "" : a).equals(b == null ? "" : b); }
+
     /** True when the due amount was recomputed from the vendor's own listing. */
     public boolean checked(Order o) { return o != null && !getMeta("due:" + o.ref, "").isEmpty(); }
 
@@ -225,7 +255,7 @@ public class MerchDb extends SQLiteOpenHelper implements CommsScanner.MetaStore 
     /** Checked again at the moment of sending anything for an order: PAID, not mismatched, received in the
      *  currency's token, and what was received >= what is due > 0 (exact decimals). */
     public boolean deliverable(Order o) {
-        if (o == null || !o.paid || mismatch(o) || !checked(o) || !listingProblems(o).isEmpty()) return false;   // never the buyer's figure (review M2)
+        if (o == null || !o.paid || mismatch(o) || conflict(o) || !checked(o) || !listingProblems(o).isEmpty()) return false;   // never the buyer's figure (review M2)
         String want = MerchMessage.tokenFor(o.currency);
         if (want == null || !want.equalsIgnoreCase(o.paidTokenid)) return false;
         try { BigDecimal d = new BigDecimal(due(o)); return d.signum() > 0 && new BigDecimal(o.paidAmount).compareTo(d) >= 0; }

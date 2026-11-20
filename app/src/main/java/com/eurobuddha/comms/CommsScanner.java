@@ -124,7 +124,8 @@ public final class CommsScanner {
 
     private int process(JSONArray coins) {
         int newCount = 0;
-        for (int i = 0; i < coins.length(); i++) {
+        // The node lists newest first; handle oldest first, so the first order sent with a ref is the one stored (H1).
+        for (int i = coins.length() - 1; i >= 0; i--) {
             JSONObject coin = coins.optJSONObject(i);
             if (coin == null) continue;
             String cid = coin.optString("coinid", "");

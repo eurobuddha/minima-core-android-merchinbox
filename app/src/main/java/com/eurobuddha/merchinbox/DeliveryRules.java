@@ -45,6 +45,8 @@ final class DeliveryRules {
         MerchDb.Order order;          // a fresh read
         boolean mismatch;
         boolean deliverable;          // MerchDb.deliverable: recorded paid in full against the listing's due
+        boolean conflict;             // MerchDb.conflict: a second, different order came with this ref
+        String nonce = "";            // MerchDb.nonce: the order's secret ("" = an older Shop: unverified ref)
         JSONObject listing;           // compact (Listing.compact), or null
         String[] line;                // {name, tokenid, quantity, stateIdx, bundle}
         String lineState = "";        // DeliveryLedger state of this line
@@ -78,6 +80,7 @@ final class DeliveryRules {
         if (in.mismatch) v.reasons.add("the order names a token that is not its currency's");
         if (!MerchMessage.validRef(o.ref)) v.reasons.add("the order's reference is not one the Shop makes: " + Listing.cap(o.ref, 70));
         if (!in.deliverable) v.reasons.add("the order is not recorded as paid in full against your listing");
+        if (in.conflict) v.reasons.add("two buyers sent orders with this reference: nothing is sent for it");
 
         // 1 + 2. listing, and only what is listed
         if (in.listing == null) {
@@ -123,6 +126,7 @@ final class DeliveryRules {
             if (c == null || !want.equalsIgnoreCase(c.optString("tokenid", "")) || c.optBoolean("spent", false)) continue;
             String h = CommsScanner.statePort(c, 1);   // no port 1, or not hex UTF-8, is never a payment (C1)
             if (o.ref.isEmpty() || h == null || !o.ref.equals(text(h))) continue;
+            if (!in.nonce.isEmpty() && !MerchMessage.commitment(in.nonce).equalsIgnoreCase(String.valueOf(CommsScanner.statePort(c, 2)))) continue;   // not this buyer's payment (H1)
             String id = c.optString("coinid", "").toLowerCase(java.util.Locale.ROOT);
             String owner = in.counted.get(id);
             if (owner != null && !owner.isEmpty() && !owner.equals(o.ref)) { v.reasons.add("coin " + id + " was counted for order " + owner); continue; }

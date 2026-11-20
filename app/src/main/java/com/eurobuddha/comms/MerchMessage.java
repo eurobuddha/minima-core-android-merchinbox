@@ -78,6 +78,9 @@ public class MerchMessage {
     // ---- status update ----
     public String status = "";
 
+    // ---- order: a secret only the buyer and the vendor know (security review H1) ----
+    public String nonce = "";        // 0x + 64 hex, inside the sealed order; the payment coin carries commitment(nonce) in port 2
+
     // ---- free text (REPLY / BUYER_REPLY / order note) ----
     public String message = "";
 
@@ -94,6 +97,7 @@ public class MerchMessage {
                 o.put("currency", currency); o.put("tokenid", tokenid); o.put("shipping", shipping);
                 o.put("delivery", delivery); o.put("buyerPayaddr", buyerPayaddr);
                 o.put("shopId", shopId); o.put("shopName", shopName);
+                if (nonce != null && !nonce.isEmpty()) o.put("nonce", nonce);
             }
             if (STATUS_UPDATE.equals(type)) o.put("status", status);
             return o.toString().getBytes(StandardCharsets.UTF_8);
@@ -105,6 +109,31 @@ public class MerchMessage {
     /** An order reference as the Shop makes it ("ORD-" or "INQ-" and hex), or any 4 to 64 letters, digits and
      *  dashes; anything else (an empty ref above all) is never accepted (security review C1). */
     public static boolean validRef(String ref) { return ref != null && ref.matches("[A-Za-z0-9-]{4,64}"); }
+
+    /** A buyer's order secret: 0x and 64 hex. */
+    public static boolean validNonce(String n) { return n != null && n.matches("0x[0-9a-fA-F]{64}"); }
+
+    /** What a payment coin carries in state port 2 for an order with this secret: 0x + SHA-256 of its bytes, upper
+     *  case. Anyone can read it on chain; only the buyer and the vendor (who decrypts the order) know the secret,
+     *  so a stranger who copies a payment's ref into an order of their own cannot make that payment theirs. */
+    public static String commitment(String nonce) {
+        if (!validNonce(nonce)) return "";
+        try {
+            byte[] in = new byte[32];
+            for (int i = 0; i < 32; i++) in[i] = (byte) Integer.parseInt(nonce.substring(2 + 2 * i, 4 + 2 * i), 16);
+            StringBuilder sb = new StringBuilder("0x");
+            for (byte b : java.security.MessageDigest.getInstance("SHA-256").digest(in)) sb.append(String.format("%02X", b));
+            return sb.toString();
+        } catch (java.security.NoSuchAlgorithmException e) { return ""; }
+    }
+
+    /** A fresh order secret (SecureRandom). */
+    public static String newNonce() {
+        byte[] b = new byte[32]; new java.security.SecureRandom().nextBytes(b);
+        StringBuilder sb = new StringBuilder("0x");
+        for (byte x : b) sb.append(String.format("%02X", x));
+        return sb.toString();
+    }
 
     public static MerchMessage fromWire(byte[] wire) {
         try {
@@ -120,6 +149,7 @@ public class MerchMessage {
             m.tokenid = o.optString("tokenid", ""); m.shipping = o.optString("shipping", "");
             m.delivery = o.optString("delivery", ""); m.buyerPayaddr = o.optString("buyerPayaddr", "");
             m.shopId = o.optString("shopId", ""); m.shopName = o.optString("shopName", "");
+            m.nonce = o.optString("nonce", "");
             m.status = o.optString("status", "");
             return m;
         } catch (Exception e) {

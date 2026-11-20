@@ -329,7 +329,7 @@ public class MainActivity extends AppCompatActivity {
         if (o == null || o.paid) return false;   // PAID locks; any other coin is counted once (recordPayment keeps its id)
         String amount = MerchDb.coinAmount(coin);   // a token coin's tokenamount, never the Minima amount backing it
         String tokenid = coin.optString("tokenid", "0x00");
-        String result = db.recordPayment(ref, coinid, amount, tokenid);   // each coin counted once
+        String result = db.recordPayment(ref, coinid, amount, tokenid, CommsScanner.statePort(coin, 2));   // each coin counted once; port 2 = the order secret's commitment (H1)
         // Auto-deliver only on a clean PAID (the token received is the order currency's) — never
         // UNDERPAID/WRONG_TOKEN, and nothing is sent for a mismatched order (MerchDb.mismatch). Queued, drained at scan end.
         if (MerchDb.PAID.equals(result)) pendingAutoDeliver.add(ref);
@@ -634,7 +634,11 @@ public class MainActivity extends AppCompatActivity {
             body.addView(sectionLabel("Items"));
             body.addView(card(itemsText(o)));
             body.addView(kv("Total", o.amount + " " + dispCurrency(o)));
-            String problems = db.listingProblems(o);
+            if (db.conflict(o)) {
+                TextView cf = label("Two buyers sent orders with this reference (it is public once paid). Nothing is sent for it: ask the buyer who paid, by message, before you send anything by hand outside this app.");
+                cf.setTextColor(Design.RED); body.addView(cf);
+            } else if (db.nonce(o).isEmpty()) body.addView(label("This order came from an older Shop without a payment secret: its payment is matched by its reference only."));
+                        String problems = db.listingProblems(o);
             TextView chk = label(!problems.isEmpty()
                     ? "Not as you list it, so nothing is sent for this order:\n• " + problems.replace("\n", "\n• ")
                     : db.checked(o) ? "Checked against your listing: due " + db.due(o) + " " + dispCurrency(o) + "."
@@ -857,6 +861,8 @@ public class MainActivity extends AppCompatActivity {
             in.order = db.order(ref);
             in.mismatch = db.mismatch(in.order);
             in.deliverable = db.deliverable(in.order);
+            in.conflict = db.conflict(in.order);
+            in.nonce = db.nonce(in.order);
             in.listing = in.order == null ? null : listingFor(in.order.shopId);
             in.line = line;
             String key = lineKey(ref, line);
