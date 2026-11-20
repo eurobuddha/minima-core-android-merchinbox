@@ -397,7 +397,7 @@ public class MainActivity extends AppCompatActivity {
             s.setText(paired ? "Connecting to your node…" : "Enable miniMall Inbox in Minima Core → Apps.");
             s.setTextColor(Design.DIM);
         } else {
-            s.setText("✓ Ready to receive orders  ·  shop key " + shortId(myId));
+            s.setText("✓ Ready to receive orders  ·  shop key " + myId);
             s.setTextColor(Design.IN);
         }
         col.addView(s);
@@ -506,7 +506,7 @@ public class MainActivity extends AppCompatActivity {
             row.addView(top);
             TextView sub = new TextView(MainActivity.this);
             String shopPrefix = o.shopName.isEmpty() ? "" : o.shopName + "   ·   ";
-            sub.setText(shopPrefix + o.amount + " " + dispCurrency(o) + "   ·   " + shortId(o.counterparty) + "   ·   " + timeAgo(o.date));
+            sub.setText(shopPrefix + o.amount + " " + dispCurrency(o) + "   ·   " + o.counterparty + "   ·   " + timeAgo(o.date));
             sub.setTextColor(Design.DIM); sub.setTextSize(12f); sub.setPadding(0, dp(3), 0, 0);
             row.addView(sub);
             row.setOnClickListener(v -> openOrder(o.ref));
@@ -563,7 +563,7 @@ public class MainActivity extends AppCompatActivity {
             body.addView(kv("Total", o.amount + " " + dispCurrency(o)));
             body.addView(kv("Reference", o.ref));
             if (!o.shopName.isEmpty()) body.addView(kv("Shop", o.shopName));
-            if (!o.coinid.isEmpty()) body.addView(copyRow("Order tx", shortId(o.coinid), o.coinid));
+            if (!o.coinid.isEmpty()) body.addView(copyRow("Order tx", o.coinid, o.coinid));
 
             // delivery
             body.addView(sectionLabel("Delivery"));
@@ -578,7 +578,7 @@ public class MainActivity extends AppCompatActivity {
                 for (String[] line : nfts) body.addView(nftSendRow(o, line));
             }
         }
-        body.addView(copyRow("Buyer key", shortId(o.counterparty), o.counterparty));
+        body.addView(copyRow("Buyer key", o.counterparty, o.counterparty));
 
         // status actions (orders only — an enquiry has no lifecycle)
         if (!inquiry) {
@@ -686,7 +686,7 @@ public class MainActivity extends AppCompatActivity {
         String sentTx = db.getMeta("nftsent:" + key, "");
         if (!sentTx.isEmpty()) {
             TextView t = new TextView(this);
-            t.setText("✓ Sent " + label + (("sent".equals(sentTx) || "posted".equals(sentTx)) ? "" : " · " + shortId(sentTx)));
+            t.setText("✓ Sent " + label + (("sent".equals(sentTx) || "posted".equals(sentTx)) ? "" : " · " + sentTx));
             t.setTextColor(Design.IN); t.setTextSize(13f); t.setPadding(0, dp(4), 0, dp(4));
             return t;
         }
@@ -702,7 +702,7 @@ public class MainActivity extends AppCompatActivity {
             if (nftSending.contains(key)) return;
             new AlertDialog.Builder(this)
                     .setTitle("Send NFT")
-                    .setMessage("Send " + label + " (" + shortId(tokenid) + ") to " + shortId(o.payaddr) + "?\n\nThis transfers the NFT on-chain.")
+                    .setMessage("Send " + label + " (" + tokenid + ") to " + o.payaddr + "?\n\nThis transfers the NFT on-chain.")
                     .setPositiveButton("Send", (d, w) -> sendNft(o, line, false))
                     .setNegativeButton("Cancel", null)
                     .show();
@@ -1188,10 +1188,6 @@ public class MainActivity extends AppCompatActivity {
         if (MerchDb.PAID.equals(s) || MerchDb.CONFIRMED.equals(s)) return Design.ACCENT;
         if (MerchDb.UNDERPAID.equals(s) || MerchDb.WRONG_TOKEN.equals(s) || MerchDb.TOKEN_MISMATCH.equals(s)) return Design.RED;
         return Design.DIM2;
-    }
-    private static String shortId(String s) {
-        if (s == null || s.length() < 14) return s == null ? "" : s;
-        return s.substring(0, 8) + "…" + s.substring(s.length() - 4);
     }
     private static String timeAgo(long ms) {
         if (ms <= 0) return "";
