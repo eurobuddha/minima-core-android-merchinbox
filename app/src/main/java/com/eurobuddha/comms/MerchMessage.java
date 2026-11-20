@@ -31,6 +31,13 @@ public class MerchMessage {
     /** "Minima" or "MxUSD" for a token from {@link #tokenFor}. */
     public static String tokenName(String tokenid) { return MINIMA_TOKEN.equals(tokenid) ? "Minima" : "MxUSD"; }
 
+    /** How a currency is shown to people: "Minima", "MxUSD" for the wire values "USDT"/"mxUSDT", else the value as given.
+     *  Display only; the wire value is never rewritten. */
+    public static String label(String currency) {
+        String t = tokenFor(currency);
+        return t != null ? tokenName(t) : currency == null ? "" : currency;
+    }
+
     /** Why a currency and a stated token id cannot be paid together, or null when they agree. A token id that is
      *  absent or empty defers to the currency; one that is present must be the currency's token (hex, any case). */
     public static String tokenProblem(String currency, String tokenid) {

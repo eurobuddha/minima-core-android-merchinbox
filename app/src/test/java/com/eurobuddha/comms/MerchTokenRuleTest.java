@@ -22,6 +22,14 @@ public class MerchTokenRuleTest {
         assertEquals("MxUSD", MerchMessage.tokenName(MXUSD));
     }
 
+    @Test public void peopleReadMxUsdNeverTheWireValue() {
+        assertEquals("MxUSD", MerchMessage.label("USDT"));
+        assertEquals("MxUSD", MerchMessage.label("mxUSDT"));
+        assertEquals("Minima", MerchMessage.label("minima"));
+        assertEquals("BTC", MerchMessage.label("BTC"));
+        assertEquals("", MerchMessage.label(null));
+    }
+
     @Test public void aStatedTokenMustBeTheCurrencysToken() {
         assertNull(MerchMessage.tokenProblem("Minima", null));
         assertNull(MerchMessage.tokenProblem("Minima", ""));

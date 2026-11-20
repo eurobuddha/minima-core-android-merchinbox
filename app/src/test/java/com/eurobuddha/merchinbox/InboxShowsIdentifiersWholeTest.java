@@ -50,4 +50,15 @@ public class InboxShowsIdentifiersWholeTest {
         assertTrue(all, all.contains(COIN));
         assertFalse(all, all.contains("…"));
     }
+
+    @Test public void anMxUsdOrderReadsMxUsdNeverTheWireValue() throws Exception {
+        MerchMessage m = new MerchMessage();
+        m.type = MerchMessage.ORDER; m.ref = "ORD-MXUSD"; m.from = BUYER; m.to = "0xME"; m.amount = "5"; m.currency = "USDT";
+        m.tokenid = "0x7D39745FBD29049BE29850B55A18BF550E4D442F930F86266E34193D89042A90"; m.items = "[]";
+        assertTrue(db.upsertOrder(m, "seller", COIN));
+        Method b = MainActivity.class.getDeclaredMethod("buildOrderDetail", String.class); b.setAccessible(true);
+        String all = String.join("\n", texts((View) b.invoke(activity, "ORD-MXUSD")));
+        assertTrue(all, all.contains("5 MxUSD"));
+        assertFalse(all, all.contains("USDT"));
+    }
 }
