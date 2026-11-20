@@ -56,6 +56,21 @@ public class MerchDb extends SQLiteOpenHelper implements CommsScanner.MetaStore 
         }
     }
 
+    /** One-time repair (security review 2026-11-20): versions before 0.5.10 set paid=1 for any recorded coin,
+     *  even an UNDERPAID or WRONG_TOKEN one. Those rows are not paid. Runs once per database (meta flag). */
+    @Override public void onOpen(SQLiteDatabase db) {
+        super.onOpen(db);
+        if (db.isReadOnly()) return;
+        try (Cursor c = db.rawQuery("SELECT v FROM " + META + " WHERE k='migrated:paid-only-on-paid'", null)) { if (c.moveToFirst()) return; }
+        db.beginTransaction();
+        try {
+            db.execSQL("UPDATE " + ORD + " SET paid=0 WHERE status IN ('" + UNDERPAID + "','" + WRONG_TOKEN + "')");
+            ContentValues f = new ContentValues(); f.put("k", "migrated:paid-only-on-paid"); f.put("v", "1");
+            db.insertWithOnConflict(META, null, f, SQLiteDatabase.CONFLICT_REPLACE);
+            db.setTransactionSuccessful();
+        } finally { db.endTransaction(); }
+    }
+
     // ----- orders -----
 
     /** Insert an incoming order/inquiry (dedup on ref; never overwrites an existing one's status).
@@ -169,6 +184,16 @@ public class MerchDb extends SQLiteOpenHelper implements CommsScanner.MetaStore 
 
     /** What is due for an order: the buyer's own figure (the Inbox does not yet recompute it). */
     public String due(Order o) { return o.amount; }
+
+    /** Checked again at the moment of sending anything for an order: PAID, not mismatched, received in the
+     *  currency's token, and what was received >= what is due > 0 (exact decimals). */
+    public boolean deliverable(Order o) {
+        if (o == null || !o.paid || mismatch(o)) return false;
+        String want = MerchMessage.tokenFor(o.currency);
+        if (want == null || !want.equalsIgnoreCase(o.paidTokenid)) return false;
+        try { BigDecimal d = new BigDecimal(due(o)); return d.signum() > 0 && new BigDecimal(o.paidAmount).compareTo(d) >= 0; }
+        catch (Exception e) { return false; }
+    }
 
     /** What a payment coin carries in its own token: a token coin's {@code tokenamount} (its {@code amount} is the
      *  Minima that backs the token), a Minima coin's {@code amount}. Missing = "0", which never pays. */

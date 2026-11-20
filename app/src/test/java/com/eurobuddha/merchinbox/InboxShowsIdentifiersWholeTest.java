@@ -74,7 +74,11 @@ public class InboxShowsIdentifiersWholeTest {
                     .put("response", new org.json.JSONObject().put("tokenid", c.substring(15)).put("decimals", 8)));
             return null;
         }).when(node).cmd(org.mockito.ArgumentMatchers.anyString(), org.mockito.ArgumentMatchers.any());
-        MerchDb.Order o = new MerchDb.Order(); o.ref = "ORD-MAN"; o.payaddr = "0x" + "12".repeat(32); o.paid = true;
+        MerchMessage paidOrder = new MerchMessage();
+        paidOrder.type = MerchMessage.ORDER; paidOrder.ref = "ORD-MAN"; paidOrder.from = BUYER; paidOrder.to = "0xME"; paidOrder.amount = "5";
+        paidOrder.currency = "Minima"; paidOrder.buyerPayaddr = PAYADDR; paidOrder.items = "[]";
+        db.upsertOrder(paidOrder, "seller", COIN); db.recordPayment("ORD-MAN", "0xBEEF", "5", "0x00");
+        MerchDb.Order o = db.order("ORD-MAN"); o.payaddr = "0x" + "12".repeat(32);
         Method send = MainActivity.class.getDeclaredMethod("sendNft", MerchDb.Order.class, String[].class, boolean.class); send.setAccessible(true);
         send.invoke(activity, o, new String[]{"x", "0x00", "1000", "0", "0"}, false);
         send.invoke(activity, o, new String[]{"x", DeliveryGuard.MXUSD, "5", "0", "0"}, false);
@@ -93,6 +97,19 @@ public class InboxShowsIdentifiersWholeTest {
         assertEquals(MerchDb.PAID, db.recordPayment("ORD-MIS", "0xD00D", "5", "0x00"));
         db.setStatus("ORD-MIS", MerchDb.CONFIRMED);
         MerchDb.Order o = db.order("ORD-MIS"); o.payaddr = "0x" + "12".repeat(32);
+        Method send = MainActivity.class.getDeclaredMethod("sendNft", MerchDb.Order.class, String[].class, boolean.class); send.setAccessible(true);
+        send.invoke(activity, o, new String[]{"x", "0x" + "AB".repeat(32), "1", "0", "0"}, false);
+        org.mockito.Mockito.verifyNoInteractions(node);
+    }
+
+    @Test public void anOrderNotPaidInFullNeverSends() throws Exception {
+        com.eurobuddha.comms.NodeApi node = org.mockito.Mockito.mock(com.eurobuddha.comms.NodeApi.class); set("node", node);
+        MerchMessage m = new MerchMessage();
+        m.type = MerchMessage.ORDER; m.ref = "ORD-SHORT"; m.from = BUYER; m.to = "0xME"; m.amount = "5"; m.currency = "Minima";
+        m.buyerPayaddr = PAYADDR; m.items = "[]";
+        db.upsertOrder(m, "seller", COIN);
+        db.recordPayment("ORD-SHORT", "0xF1", "4", "0x00");
+        MerchDb.Order o = db.order("ORD-SHORT"); o.paid = true; o.payaddr = "0x" + "12".repeat(32);   // a stale screen copy says paid
         Method send = MainActivity.class.getDeclaredMethod("sendNft", MerchDb.Order.class, String[].class, boolean.class); send.setAccessible(true);
         send.invoke(activity, o, new String[]{"x", "0x" + "AB".repeat(32), "1", "0", "0"}, false);
         org.mockito.Mockito.verifyNoInteractions(node);

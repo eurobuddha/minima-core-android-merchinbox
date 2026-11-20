@@ -357,7 +357,7 @@ public class MainActivity extends AppCompatActivity {
     private void maybeAutoDeliver(String ref) {
         if (!autoDeliverOn()) return;
         MerchDb.Order o = db.order(ref);
-        if (o == null || !o.paid) return;
+        if (!db.deliverable(o)) return;
         if (!MerchDb.PAID.equals(o.status) && !MerchDb.CONFIRMED.equals(o.status)) return;
         if (o.payaddr == null || o.payaddr.isEmpty()) return;   // undeliverable — order screen explains
         for (String[] line : nftLines(o)) {
@@ -726,7 +726,9 @@ public class MainActivity extends AppCompatActivity {
         // The pay address is buyer-supplied chain data interpolated into a node command — validate hard.
         if (!Util.isValidAddress(o.payaddr)) { deliverFailed(o, key, "buyer pay address is malformed", auto); return; }
         if (!Util.isValidHexId(tokenid)) { deliverFailed(o, key, "token id is malformed", auto); return; }
-        if (db.mismatch(db.order(o.ref))) { deliverFailed(o, key, "this order names a token that is not its currency's; its NFTs are never sent", auto); return; }
+        MerchDb.Order now = db.order(o.ref);   // checked again at the moment of sending, never from the screen's copy
+        if (db.mismatch(now)) { deliverFailed(o, key, "this order names a token that is not its currency's; its NFTs are never sent", auto); return; }
+        if (!db.deliverable(now)) { deliverFailed(o, key, "this order is not paid in full in its currency's token; nothing was sent", auto); return; }
         guardDelivery(o, line, key, auto, () -> {
             if ("1".equals(line[4])) { collectionDeliver(o, line, auto); return; }
             if (!"0".equals(line[3])) { stateNftDeliver(o, line, auto); return; }

@@ -146,6 +146,32 @@ public class MerchDbTokenTest {
         assertFalse(db.mismatch(db.order("ORD-N")));
     }
 
+    @Test public void oldRowsMarkedPaidForAWrongOrShortCoinAreRepairedOnce() {
+        for (String[] r : new String[][]{{"ORD-L1", MerchDb.UNDERPAID}, {"ORD-L2", MerchDb.WRONG_TOKEN}, {"ORD-L3", MerchDb.PAID}}) {
+            ContentValues v = new ContentValues();   // what versions before 0.5.10 stored: paid=1 for any coin
+            v.put("ref", r[0]); v.put("role", "seller"); v.put("amount", "5"); v.put("currency", "Minima");
+            v.put("tokenid", "0x00"); v.put("status", r[1]); v.put("paid", 1); v.put("paidamount", "5"); v.put("paidtokenid", "0x00"); v.put("date", 1L);
+            db.getWritableDatabase().insert("orders", null, v);
+        }
+        db.getWritableDatabase().delete("meta", "k=?", new String[]{"migrated:paid-only-on-paid"});
+        db.close(); db = new MerchDb(RuntimeEnvironment.getApplication());
+        assertFalse(db.order("ORD-L1").paid);
+        assertFalse(db.order("ORD-L2").paid);
+        assertTrue(db.order("ORD-L3").paid);
+    }
+
+    @Test public void deliverableIsCheckedFromTheRowNotTheStatus() {
+        ContentValues v = new ContentValues();   // an old row: paid=1 and CONFIRMED, but the coin was Minima on an MxUSD order
+        v.put("ref", "ORD-Q"); v.put("role", "seller"); v.put("amount", "5"); v.put("currency", "USDT");
+        v.put("tokenid", "0x00"); v.put("status", MerchDb.CONFIRMED); v.put("paid", 1); v.put("paidamount", "5"); v.put("paidtokenid", "0x00"); v.put("date", 1L);
+        db.getWritableDatabase().insert("orders", null, v);
+        assertFalse(db.deliverable(db.order("ORD-Q")));
+        db.upsertOrder(order("ORD-R", MerchMessage.ORDER, "USDT", MXUSD), "seller", "0xC16");
+        assertFalse(db.deliverable(db.order("ORD-R")));
+        db.recordPayment("ORD-R", "0xE1", "5", MXUSD);
+        assertTrue(db.deliverable(db.order("ORD-R")));
+    }
+
     @Test public void anInquiryStaysAnInquiry() {
         db.upsertOrder(order("INQ-E", MerchMessage.INQUIRY, "Minima", MXUSD), "seller", "0xC05");
         assertEquals(MerchDb.INQUIRY, db.order("INQ-E").status);
