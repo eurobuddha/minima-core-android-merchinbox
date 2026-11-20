@@ -365,15 +365,29 @@ public class MainActivity extends AppCompatActivity {
                     if (bos.size() + n > 16 * 1024 * 1024) throw new IllegalArgumentException("That file is too large to be a .shop file.");
                     bos.write(buf, 0, n);
                 }
-                JSONObject listing = Listing.compact(new String(bos.toByteArray(), java.nio.charset.StandardCharsets.UTF_8), me);
-                String shopId = listing.getString("shopId");
-                db.setMeta("listing:" + shopId, listing.toString());
-                int checked = 0;
-                for (MerchDb.Order o : db.orders()) if ("seller".equals(o.role) && shopId.equals(o.shopId)) { recheck(o); checked++; }
-                msg = "Your listing for \"" + listing.optString("shopName", shopId) + "\" is in. " + checked + " order(s) checked against it; new orders are checked as they arrive.";
+                // Only a listing the vendor's own Studio signed with this shop key (M1), shown in full first.
+                final JSONObject listing = Listing.compact(Listing.unseal(new String(bos.toByteArray(), java.nio.charset.StandardCharsets.UTF_8), crypto, me), me);
+                final String shopId = listing.getString("shopId");
+                final String summary = Listing.summary(listing, listingFor(shopId));
+                ui.post(() -> new AlertDialog.Builder(this).setTitle("Use this listing?").setMessage(summary)
+                        .setPositiveButton("Use this listing", (d, w) -> useListing(listing))
+                        .setNegativeButton("Cancel", null).show());
+                return;
             } catch (IllegalArgumentException e) { msg = e.getMessage(); }
             catch (Exception e) { msg = "That file could not be read."; }
             final String say = msg;
+            ui.post(() -> { new AlertDialog.Builder(this).setTitle("Your listing").setMessage(say).setPositiveButton("OK", null).show(); refreshVisibleOrderOrList(); });
+        });
+    }
+
+    /** The vendor read the summary and chose it: stored, and every order of that shop is checked against it again. */
+    private void useListing(final JSONObject listing) {
+        io.execute(() -> {
+            String shopId = listing.optString("shopId");
+            db.setMeta("listing:" + shopId, listing.toString());
+            int checked = 0;
+            for (MerchDb.Order o : db.orders()) if ("seller".equals(o.role) && shopId.equals(o.shopId)) { recheck(o); checked++; }
+            final String say = "Your listing for \"" + listing.optString("shopName", shopId) + "\" is in. " + checked + " order(s) checked against it; new orders are checked as they arrive.";
             ui.post(() -> { new AlertDialog.Builder(this).setTitle("Your listing").setMessage(say).setPositiveButton("OK", null).show(); refreshVisibleOrderOrList(); });
         });
     }

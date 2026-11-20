@@ -29,6 +29,56 @@ final class Listing {
 
     private static boolean plain(String v) { return v != null && v.matches("\\d{1,30}(\\.\\d{0,44})?|\\.\\d{1,44}"); }
 
+    /** The listing inside a .shop as the vendor's Studio sealed it to the vendor ("listingSealed": the shop without
+     *  pictures, sealed and signed with the shop key, security review M1): returns that plaintext, or throws with
+     *  the plain reason. Only the holder of this shop key can make one; a file without it is refused. */
+    static String unseal(String shopJson, com.eurobuddha.comms.CryptoProvider crypto, String myId) {
+        String blob;
+        try { blob = new JSONObject(shopJson).optString("listingSealed", ""); } catch (Exception e) { throw new IllegalArgumentException("That is not a .shop file."); }
+        if (blob.isEmpty()) throw new IllegalArgumentException("This .shop file is not signed by your shop key. Export it again from miniMall Studio (it now signs the listing) and import that file.");
+        com.eurobuddha.comms.Opened opened;
+        try { opened = crypto == null ? null : crypto.open(blob); } catch (Throwable e) { opened = null; }
+        if (opened == null || !opened.valid || myId == null || !myId.equalsIgnoreCase(opened.fromPublicId))
+            throw new IllegalArgumentException("This .shop file's listing is not signed by your shop key. Export it again from miniMall Studio and import that file.");
+        return new String(opened.plaintext, java.nio.charset.StandardCharsets.UTF_8);
+    }
+
+    /** Every product of a compact listing (name, token id whole, price, stock) and its delivery fees, and how it
+     *  differs from the current one (null = none), for the vendor to read before "Use this listing". */
+    static String summary(JSONObject next, JSONObject current) {
+        StringBuilder sb = new StringBuilder("Shop \"" + next.optString("shopName", next.optString("shopId")) + "\" (" + next.optString("shopId") + "), paid in " + MerchMessage.label(next.optString("currency")) + "\n");
+        java.util.Map<String, String> now = lines(next), before = current == null ? new java.util.LinkedHashMap<>() : lines(current);
+        for (String l : now.values()) sb.append("\n• ").append(l);
+        if (current != null) {
+            StringBuilder d = new StringBuilder();
+            for (java.util.Map.Entry<String, String> e : now.entrySet()) {
+                String old = before.get(e.getKey());
+                if (old == null) d.append("\n+ ").append(e.getValue());
+                else if (!old.equals(e.getValue())) d.append("\n~ ").append(old).append("\n  → ").append(e.getValue());
+            }
+            for (java.util.Map.Entry<String, String> e : before.entrySet()) if (!now.containsKey(e.getKey())) d.append("\n− ").append(e.getValue());
+            sb.append("\n\nChanges from the listing in use:").append(d.length() == 0 ? "\nnone" : d.toString());
+        }
+        return sb.toString();
+    }
+
+    private static java.util.Map<String, String> lines(JSONObject l) {
+        java.util.Map<String, String> m = new java.util.LinkedHashMap<>();
+        JSONArray p = l.optJSONArray("products");
+        for (int i = 0; p != null && i < p.length(); i++) {
+            JSONObject x = p.optJSONObject(i); if (x == null) continue;
+            String t = x.optString("nftTokenId"), key = x.optString("name") + "|" + t + "|" + x.optInt("nftStateIdx") + "|" + x.optInt("nftBundle");
+            m.put(key, "\"" + x.optString("name") + "\"" + (t.isEmpty() ? "" : " token " + t + (x.optInt("nftStateIdx") > 0 ? " #" + x.optInt("nftStateIdx") : "") + (x.optInt("nftBundle") > 0 ? " (complete collection)" : ""))
+                    + ": price " + x.optString("price") + ", stock " + (x.optInt("nftStateIdx") > 0 || x.optInt("nftBundle") > 0 ? 1 : x.optInt("maxUnits", 10)));
+        }
+        JSONArray s = l.optJSONArray("shipping");
+        for (int i = 0; s != null && i < s.length(); i++) {
+            JSONObject x = s.optJSONObject(i); if (x == null) continue;
+            m.put("ship|" + x.optString("id"), "delivery \"" + x.optString("id") + "\": fee " + x.optString("fee"));
+        }
+        return m;
+    }
+
     /** A compact copy of the vendor's own .shop, or IllegalArgumentException with the plain reason. */
     static JSONObject compact(String shopJson, String myId) {
         JSONObject o;
@@ -48,6 +98,8 @@ final class Listing {
                 JSONObject p = in.optJSONObject(i); if (p == null) continue;
                 String price = p.optString("price", "");
                 if (!plain(price)) throw new IllegalArgumentException("The price of \"" + p.optString("name") + "\" is not a plain number (" + price + ").");
+                if (!p.optString("nftTokenId", "").isEmpty() && new BigDecimal(price).signum() <= 0)
+                    throw new IllegalArgumentException("The NFT \"" + cap(p.optString("name"), 60) + "\" is priced at 0: an NFT is never listed for nothing.");
                 products.put(new JSONObject().put("name", p.optString("name", "Item")).put("price", price)
                         .put("maxUnits", p.optInt("maxUnits", 10)).put("nftTokenId", p.optString("nftTokenId", ""))
                         .put("nftStateIdx", p.optInt("nftStateIdx", 0)).put("nftBundle", p.optInt("nftBundle", 0) > 0 ? 1 : 0));

@@ -92,4 +92,37 @@ public class ListingTest {
         MerchDb.Order o = order("Minima", "digital"); o.items = "[" + "[".repeat(5000) + "]".repeat(5000) + "]";
         assertFalse(Listing.check(l, o).problems.isEmpty());
     }
+
+    /** A stand-in for the shop key's sealed box: "sealed:<from>:<hex text>". */
+    static final class FakeCrypto implements com.eurobuddha.comms.CryptoProvider {
+        public String identity() { return ME; }
+        public String seal(String to, byte[] p) { return "sealed:" + ME + ":" + new String(p, java.nio.charset.StandardCharsets.UTF_8); }
+        public com.eurobuddha.comms.Opened open(String blob) {
+            if (!blob.startsWith("sealed:")) return null;
+            String[] f = blob.split(":", 3);
+            return new com.eurobuddha.comms.Opened(true, f[1], f[2].getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        }
+    }
+
+    @Test public void onlyAListingSignedWithThisShopKeyIsUsed() throws Exception {
+        String plain = shop(ME, "Minima", null, "2.5");
+        assertThrows(IllegalArgumentException.class, () -> Listing.unseal(plain, new FakeCrypto(), ME));   // an old unsigned .shop
+        String signed = new JSONObject(plain).put("listingSealed", "sealed:" + ME + ":" + plain).toString();
+        assertEquals(plain, Listing.unseal(signed, new FakeCrypto(), ME));
+        String other = "0x" + "EF".repeat(64);
+        String forged = new JSONObject(plain).put("listingSealed", "sealed:" + other + ":" + plain).toString();
+        assertThrows(IllegalArgumentException.class, () -> Listing.unseal(forged, new FakeCrypto(), ME));
+        String garbage = new JSONObject(plain).put("listingSealed", "0x1234").toString();
+        assertThrows(IllegalArgumentException.class, () -> Listing.unseal(garbage, new FakeCrypto(), ME));
+    }
+
+    @Test public void anNftPricedAtZeroIsRefusedAndTheSummaryShowsEverythingWhole() throws Exception {
+        assertThrows(IllegalArgumentException.class, () -> Listing.compact(shop(ME, "Minima", null, "2.5").replace("\"price\":\"10\"", "\"price\":\"0\""), ME));
+        JSONObject now = Listing.compact(shop(ME, "Minima", null, "2.5"), ME);
+        JSONObject next = Listing.compact(shop(ME, "Minima", null, "3"), ME);
+        String s = Listing.summary(next, now);
+        assertTrue(s, s.contains(NFT) && s.contains("price 10, stock 1") && s.contains("fee 1.5"));
+        assertTrue(s, s.contains("~ \"Print\": price 2.5, stock 3\n  → \"Print\": price 3, stock 3"));
+        assertTrue(Listing.summary(now, now).contains("Changes from the listing in use:\nnone"));
+    }
 }
