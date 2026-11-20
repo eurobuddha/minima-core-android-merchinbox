@@ -64,6 +64,21 @@ final class Listing {
         return out;
     }
 
+    /** The one listed product a line names (same name, NFT token id, edition, bundle), or null. */
+    static JSONObject product(JSONObject listing, String name, String token, int idx, int bundle) {
+        JSONArray products = listing.optJSONArray("products");
+        JSONObject match = null;
+        for (int j = 0; products != null && j < products.length(); j++) {
+            JSONObject p = products.optJSONObject(j);
+            if (p != null && name.equals(p.optString("name")) && token.equalsIgnoreCase(p.optString("nftTokenId"))
+                    && idx == p.optInt("nftStateIdx") && bundle == p.optInt("nftBundle")) {
+                if (match != null) return null;
+                match = p;
+            }
+        }
+        return match;
+    }
+
     /** What an order is due by the listing, and every way it departs from it (empty = it matches). */
     static Check check(JSONObject listing, MerchDb.Order o) {
         BigDecimal due = BigDecimal.ZERO;
@@ -75,6 +90,7 @@ final class Listing {
         try { items = new JSONArray(o.items == null || o.items.isEmpty() ? "[]" : o.items); } catch (Exception e) { items = null; }
         if (items == null || items.length() == 0) problems.add("the order has no items you can read");
         JSONArray products = listing.optJSONArray("products");
+        java.util.Map<JSONObject, BigDecimal> perProduct = new java.util.IdentityHashMap<>();   // all lines of one product together (L6)
         if (items != null) for (int i = 0; i < items.length(); i++) {
             JSONObject it = items.optJSONObject(i);
             if (it == null) { problems.add("an item cannot be read"); continue; }
@@ -101,6 +117,10 @@ final class Listing {
             try { stated = new BigDecimal(it.optString("unitPrice", "")); } catch (Exception e) { stated = null; }
             if (stated == null || stated.compareTo(price) != 0) { problems.add(what + ": the order's price " + it.optString("unitPrice", "(none)") + " is not your price " + price.toPlainString()); continue; }
             due = due.add(price.multiply(qty));
+            BigDecimal together = perProduct.getOrDefault(match, BigDecimal.ZERO).add(qty);
+            perProduct.put(match, together);
+            int stock = bundle == 1 || idx > 0 ? 1 : Math.max(1, match.optInt("maxUnits", 10));
+            if (together.compareTo(BigDecimal.valueOf(stock)) > 0) problems.add(what + ": the order's lines together ask for " + together.toPlainString() + ", more than you list (" + stock + ")");
         }
         BigDecimal fee = null;
         JSONArray shipping = listing.optJSONArray("shipping");

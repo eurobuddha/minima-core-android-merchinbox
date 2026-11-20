@@ -342,6 +342,7 @@ public class MainActivity extends AppCompatActivity {
                 pendingAutoDeliver.clear();
                 for (String r : refs) maybeAutoDeliver(r);
             }
+            if (autoDeliverOn()) autoDeliverSweep();   // each block: lines waiting for confirmations are checked again
             if (newCount <= 0) return;
             notifyNew(newCount);
             refreshVisibleOrderOrList();
@@ -392,12 +393,10 @@ public class MainActivity extends AppCompatActivity {
 
     // ---- automatic NFT delivery ----
 
-    static final String AUTO_OFF_WHY = "⚡ Auto NFT delivery is off: an order's NFTs, quantities and total are the buyer's own figures and are not checked against your listing. Check each order, then use Send NFT.";
 
-    /** OFF, and not switchable, until the Inbox can check an order against the vendor's own listing (security
-     *  review 2026-11-20): an order's NFT lines, quantities and total are the buyer's own figures. The stored
-     *  "autodeliver" setting is kept but never acted on. */
-    private boolean autoDeliverOn() { return false; }
+    /** Automatic delivery: OFF unless the vendor switches it on ("autosend"; the old "autodeliver" setting, ON by
+     *  default before, is never read). Even ON, an order is sent only when every DeliveryRules check passes. */
+    private boolean autoDeliverOn() { return "1".equals(db.getMeta("autosend", "0")); }
 
     /** Auto-send every unsent NFT line of a cleanly-paid order. Idempotent: nftsent: meta skips
      *  delivered lines, autoTried caps automatic attempts at one per line per session. */
@@ -410,8 +409,8 @@ public class MainActivity extends AppCompatActivity {
         for (String[] line : nftLines(o)) {
             String key = lineKey(ref, line);
             if (!db.getMeta("nftsent:" + key, "").isEmpty()) continue;
-            if (!autoTried.add(key)) continue;
-            sendNft(o, line, true);
+            if (autoTried.contains(key) || !DeliveryLedger.state(db.getReadableDatabase(), ledgerKey(ref, line)).isEmpty()) continue;   // one automatic send per line
+            sendNft(o, line, true);   // runs every DeliveryRules check; a line that fails waits (checked again at the next block)
         }
     }
 
@@ -455,12 +454,36 @@ public class MainActivity extends AppCompatActivity {
         }
         col.addView(s);
 
-        // Automatic NFT delivery is off and cannot be switched on (see autoDeliverOn).
+        // Automatic NFT delivery (default OFF) and the payment confirmations every send needs.
+        final boolean auto = autoDeliverOn();
         TextView ad = new TextView(this);
-        ad.setText(AUTO_OFF_WHY);
-        ad.setTextColor(Design.DIM);
-        ad.setTextSize(12.5f); ad.setPadding(dp(16), 0, dp(16), dp(8));
+        ad.setText("⚡ Auto NFT delivery  ·  " + (auto ? "ON" : "OFF") + "  ·  only orders that pass every check (tap to change)");
+        ad.setTextColor(auto ? Design.IN : Design.DIM);
+        ad.setTextSize(12.5f); ad.setPadding(dp(16), 0, dp(16), dp(4));
+        ad.setOnClickListener(v -> {
+            if (auto) { io.execute(() -> { db.setMeta("autosend", "0"); ui.post(() -> refreshTop(buildOrders())); }); return; }
+            new AlertDialog.Builder(this).setTitle("Turn on automatic NFT delivery?")
+                    .setMessage("An NFT is then sent without asking you, but only when the order matches your imported listing, the line is listed and in stock, it was not sent before, and the payment is on chain in full with at least " + minConf() + " confirmation(s). Anything else waits for you with the reasons listed.")
+                    .setPositiveButton("Turn on", (d, w) -> io.execute(() -> { db.setMeta("autosend", "1"); ui.post(() -> refreshTop(buildOrders())); }))
+                    .setNegativeButton("Cancel", null).show();
+        });
         col.addView(ad);
+        TextView mc = new TextView(this);
+        mc.setText("⛓ Payments need " + minConf() + " confirmation(s) before anything is sent (tap to change)");
+        mc.setTextColor(Design.DIM); mc.setTextSize(12.5f); mc.setPadding(dp(16), 0, dp(16), dp(8));
+        mc.setOnClickListener(v -> {
+            final EditText in = new EditText(this);
+            in.setInputType(android.text.InputType.TYPE_CLASS_NUMBER); in.setText(String.valueOf(minConf()));
+            new AlertDialog.Builder(this).setTitle("Confirmations").setMessage("How many blocks a payment coin must have before an NFT is sent (at least 1).").setView(in)
+                    .setPositiveButton("Save", (d, w) -> {
+                        int n; try { n = Integer.parseInt(in.getText().toString().trim()); } catch (NumberFormatException e) { n = 0; }
+                        if (n < 1) { toast("At least 1 confirmation."); return; }
+                        final int keep = n;
+                        io.execute(() -> { db.setMeta("minconf", String.valueOf(keep)); ui.post(() -> refreshTop(buildOrders())); });
+                    })
+                    .setNegativeButton("Cancel", null).show();
+        });
+        col.addView(mc);
 
         col.addView(filterBar());
         final HorizontalScrollView shopBar = new HorizontalScrollView(this);
@@ -610,7 +633,7 @@ public class MainActivity extends AppCompatActivity {
             TextView chk = label(!problems.isEmpty()
                     ? "Not as you list it, so nothing is sent for this order:\n• " + problems.replace("\n", "\n• ")
                     : db.checked(o) ? "Checked against your listing: due " + db.due(o) + " " + dispCurrency(o) + "."
-                    : "Unchecked: the items and the total " + o.amount + " " + dispCurrency(o) + " are the buyer's own figures. Import the .shop file you published (⇪ on the orders screen) so the Inbox checks orders against your listing.");
+                    : "Unchecked: the items and the total " + o.amount + " " + dispCurrency(o) + " are the buyer's own figures, and nothing can be sent for this order until you import the .shop file you published (⇪ on the orders screen).");
             if (!problems.isEmpty() || !db.checked(o)) chk.setTextColor(Design.RED);
             body.addView(chk);
             body.addView(kv("Reference", o.ref));
@@ -715,11 +738,14 @@ public class MainActivity extends AppCompatActivity {
                 int q = Math.max(1, it.optInt("quantity", 1));
                 int idx = Math.max(0, it.optInt("nftStateIdx", 0));
                 int bundle = it.optInt("nftBundle", 0) > 0 ? 1 : 0;
-                out.add(new String[]{it.optString("product", "NFT"), tokenid, String.valueOf(q), String.valueOf(idx), String.valueOf(bundle)});
+                out.add(new String[]{it.optString("product", "NFT"), tokenid, String.valueOf(q), String.valueOf(idx), String.valueOf(bundle), String.valueOf(i)});
             }
         } catch (Exception ignored) {}
         return out;
     }
+
+    /** The delivery ledger's key for one order line: the order ref and the line's index in the order (L6). */
+    static String ledgerKey(String ref, String[] line) { return ref + "|" + line[5]; }
 
     /** Meta/set key for one deliverable line. Plain NFTs keep the historical ref:tokenid shape (so
      *  existing nftsent: metas survive); pieces append #idx; complete-collection bundles #ALL. */
@@ -743,32 +769,49 @@ public class MainActivity extends AppCompatActivity {
             return t;
         }
         LinearLayout wrap = new LinearLayout(this); wrap.setOrientation(LinearLayout.VERTICAL);
-        boolean ready = o.paid && o.payaddr != null && !o.payaddr.isEmpty() && !db.mismatch(o);
         boolean inFlight = nftSending.contains(key);
-        TextView b = button(inFlight ? "Sending…" : "Send " + label + " to buyer", ready && !inFlight);
+        // A send that did not finish may have gone: nothing more is sent until the vendor has checked the history.
+        if (DeliveryLedger.RESERVED.equals(DeliveryLedger.state(db.getReadableDatabase(), ledgerKey(o.ref, line))) && !inFlight) {
+            wrap.addView(label("This line's send did not finish and may have gone. Check your wallet's transaction history for "
+                    + (bundle ? "the pieces" : piece ? "edition #" + line[3] : qty) + " of token\n" + tokenid + "\nto\n" + o.payaddr
+                    + "\nNothing more is sent for it until you say it was not sent."));
+            TextView rel = button("I checked: it was NOT sent", true);
+            rel.setOnClickListener(v -> new AlertDialog.Builder(this).setTitle("It was not sent?")
+                    .setMessage("Only if your wallet's history shows no send of token\n" + tokenid + "\nto\n" + o.payaddr + "\nfor this order. If it went, saying it did not lets it be sent twice.")
+                    .setPositiveButton("It was not sent", (d, w) -> io.execute(() -> { DeliveryLedger.mark(db.getWritableDatabase(), ledgerKey(o.ref, line), DeliveryLedger.RELEASED); ui.post(() -> refreshOrderIfTopmost(o.ref)); }))
+                    .setNegativeButton("Cancel", null).show());
+            wrap.addView(rel);
+            return wrap;
+        }
+        TextView b = button(inFlight ? "Sending…" : "Send " + label + " to buyer", !inFlight);
         LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
         lp.topMargin = dp(6); b.setLayoutParams(lp);
+        final TextView why = new TextView(this);
+        why.setText("Checking…"); why.setTextColor(Design.DIM2); why.setTextSize(11f); why.setPadding(0, dp(2), 0, 0);
         b.setOnClickListener(v -> {
-            if (!o.paid) { toast("Awaiting payment first."); return; }
-            if (o.payaddr == null || o.payaddr.isEmpty()) { toast("This order carries no buyer pay address."); return; }
             if (nftSending.contains(key)) return;
-            new AlertDialog.Builder(this)
-                    .setTitle("Send NFT")
-                    .setMessage("Send " + label + "?\n\nToken id\n" + tokenid + "\n\nQuantity\n"
-                            + (bundle ? "every piece you hold" : piece ? "1 (edition #" + line[3] + ")" : qty)
-                            + "\n\nTo\n" + o.payaddr + "\n\nThis transfers the NFT on-chain.")
-                    .setPositiveButton("Send", (d, w) -> sendNft(o, line, false))
-                    .setNegativeButton("Cancel", null)
-                    .show();
+            checkDelivery(o.ref, line, verdict -> {
+                if (!verdict.reasons.isEmpty()) {   // refused: there is no override
+                    new AlertDialog.Builder(this).setTitle("NFT not sent").setMessage("Not sent:\n• " + String.join("\n• ", verdict.reasons))
+                            .setPositiveButton("OK", null).show();
+                    return;
+                }
+                MerchDb.Order now = db.order(o.ref);
+                new AlertDialog.Builder(this)
+                        .setTitle("Send NFT")
+                        .setMessage("Send " + label + "?\n\nToken id\n" + tokenid + "\n\nQuantity\n"
+                                + (bundle ? "every piece you hold" : piece ? "1 (edition #" + line[3] + ")" : qty)
+                                + "\n\nTo\n" + now.payaddr + "\n\nPaid on chain\n" + verdict.paid.toPlainString() + " of " + verdict.due.toPlainString() + " due"
+                                + "\n\nThis transfers the NFT on-chain.")
+                        .setPositiveButton("Send", (d, w) -> sendNft(now, line, false))
+                        .setNegativeButton("Cancel", null)
+                        .show();
+            });
         });
         wrap.addView(b);
-        if (!ready) {
-            TextView why = new TextView(this);
-            why.setText(db.mismatch(o) ? "Not sent: this order names a token that is not its currency's."
-                    : !o.paid ? "Available once the order is paid." : "The order didn't include a buyer pay address.");
-            why.setTextColor(Design.DIM2); why.setTextSize(11f); why.setPadding(0, dp(2), 0, 0);
-            wrap.addView(why);
-        }
+        wrap.addView(why);
+        checkDelivery(o.ref, line, verdict -> why.setText(verdict.reasons.isEmpty() ? "Every check passes: ready to send."
+                : "Waiting, nothing is sent until:\n• " + String.join("\n• ", verdict.reasons)));
         return wrap;
     }
 
@@ -776,61 +819,102 @@ public class MainActivity extends AppCompatActivity {
      *  replayed; plain NFTs go via `send` (atomic, mark-on-post). auto=true is the headless
      *  payment-confirmed path: no toasts, notifications instead, refresh only if visible. */
     private void sendNft(final MerchDb.Order o, final String[] line, final boolean auto) {
-        final String tokenid = line[1], qty = line[2];
         final String key = lineKey(o.ref, line);
-        // The pay address is buyer-supplied chain data interpolated into a node command — validate hard.
-        if (!Util.isValidAddress(o.payaddr)) { deliverFailed(o, key, "buyer pay address is malformed", auto); return; }
-        if (!Util.isValidHexId(tokenid)) { deliverFailed(o, key, "token id is malformed", auto); return; }
-        MerchDb.Order now = db.order(o.ref);   // checked again at the moment of sending, never from the screen's copy
-        if (db.mismatch(now)) { deliverFailed(o, key, "this order names a token that is not its currency's; its NFTs are never sent", auto); return; }
-        if (!db.deliverable(now)) { deliverFailed(o, key, "this order is not paid in full in its currency's token; nothing was sent", auto); return; }
-        guardDelivery(o, line, key, auto, () -> {
-            if ("1".equals(line[4])) { collectionDeliver(o, line, auto); return; }
-            if (!"0".equals(line[3])) { stateNftDeliver(o, line, auto); return; }
-            plainDeliver(o, line, key, auto);
+        if (!nftSending.add(key)) return;   // one check-and-send per line at a time
+        checkDelivery(o.ref, line, v -> {
+            if (!v.reasons.isEmpty()) { deliverFailed(o, key, "Not sent:\n• " + String.join("\n• ", v.reasons), auto); return; }
+            io.execute(() -> {
+                final String why = !db.getMeta("nftsent:" + key, "").isEmpty() ? "this line was already sent"
+                        : DeliveryLedger.reserve(db.getWritableDatabase(), ledgerKey(o.ref, line), v.product, v.token, v.qty, v.stock, v.held);
+                final MerchDb.Order now = db.order(o.ref);   // the fresh row the checks used: its buyer address
+                ui.post(() -> {
+                    if (why != null) { deliverFailed(o, key, "Not sent: " + why, auto); return; }
+                    if (auto) autoTried.add(key);
+                    if (auto) android.util.Log.i("miniMallInbox", "automatic delivery: " + v.qty.toPlainString() + " of token " + v.token
+                            + " for order " + now.ref + " to " + now.payaddr);
+                    nftSending.remove(key);   // each transfer path below takes the line again
+                    if ("1".equals(line[4])) { collectionDeliver(now, line, auto); return; }
+                    if (!"0".equals(line[3])) { stateNftDeliver(now, line, auto); return; }
+                    plainDeliver(now, line, key, auto);
+                });
+            });
         });
     }
 
-    /** Every delivery passes DeliveryGuard first: never Minima or MxUSD, only a token the node confirms has
-     *  0 decimals, never more than the vendor holds (that last check is skipped once this line's transfer was
-     *  posted, when the coins are expected to be gone). Any doubt refuses; nothing is sent. */
-    private void guardDelivery(final MerchDb.Order o, final String[] line, final String key, final boolean auto, final Runnable go) {
+    /** Every rule of DeliveryRules, from fresh reads: the chain tip, the token, the vendor's holdings, the
+     *  payment coins at the vendor's own address, and (on the io thread) the order, its listing and the ledger. */
+    private void checkDelivery(final String ref, final String[] line, final java.util.function.Consumer<DeliveryRules.Verdict> then) {
         final String tokenid = line[1];
-        final String qty = "0".equals(line[3]) && "0".equals(line[4]) ? line[2] : "1";
-        String bad = DeliveryGuard.basic(tokenid);
-        if (bad != null) { deliverFailed(o, key, bad, auto); return; }
-        node.cmd("tokens tokenid:" + tokenid, new NodeApi.Cb() {
-            @Override public void onResult(JSONObject t) {
-                String why = DeliveryGuard.token(tokenid, t);
-                if (why != null) { deliverFailed(o, key, why, auto); return; }
-                if (!db.getMeta("nftposted:" + key, "").isEmpty()) { go.run(); return; }
-                node.cmd("coins relevant:true tokenid:" + tokenid, new NodeApi.Cb() {
-                    @Override public void onResult(JSONObject c) {
-                        String w = DeliveryGuard.held(tokenid, qty, c);
-                        if (w != null) deliverFailed(o, key, w, auto); else go.run();
-                    }
-                    @Override public void onError(String m) { deliverFailed(o, key, "your holdings could not be read; nothing was sent", auto); }
-                });
+        final boolean askToken = DeliveryGuard.basic(tokenid) == null;
+        ask("block", b -> ask(askToken ? "tokens tokenid:" + tokenid : null, t -> ask(askToken ? "coins relevant:true tokenid:" + tokenid : null, h ->
+                ask(Util.isValidAddress(vendorAddr) ? "coins relevant:true address:" + vendorAddr : null, pay -> io.execute(() -> {
+            DeliveryRules.Inputs in = new DeliveryRules.Inputs();
+            in.order = db.order(ref);
+            in.mismatch = db.mismatch(in.order);
+            in.listing = in.order == null ? null : listingFor(in.order.shopId);
+            in.line = line;
+            String key = lineKey(ref, line);
+            android.database.sqlite.SQLiteDatabase w = db.getWritableDatabase();
+            in.lineState = !db.getMeta("nftsent:" + key, "").isEmpty() ? DeliveryLedger.SENT : DeliveryLedger.state(w, ledgerKey(ref, line));
+            in.resuming = !db.getMeta("nftposted:" + key, "").isEmpty();
+            in.tokenReply = t; in.holdingsReply = h; in.paymentReply = pay;
+            try { in.tip = Long.parseLong(b == null || b.optJSONObject("response") == null ? "" : b.optJSONObject("response").optString("block", "")); } catch (NumberFormatException e) { in.tip = 0; }
+            in.minConf = minConf();
+            JSONArray coins = pay == null ? null : pay.optJSONArray("response");
+            for (int i = 0; coins != null && i < coins.length(); i++) {
+                JSONObject c = coins.optJSONObject(i); if (c == null) continue;
+                String id = c.optString("coinid", "").toLowerCase(java.util.Locale.ROOT);
+                in.counted.put(id, db.getMeta("paycoin:" + id, ""));
             }
-            @Override public void onError(String m) { deliverFailed(o, key, "the node did not confirm the token; nothing was sent", auto); }
+            DeliveryRules.Verdict v = DeliveryRules.reasons(in);
+            if (!v.product.isEmpty()) { in.delivered = DeliveryLedger.delivered(w, v.product); in.inflight = DeliveryLedger.inflight(w, tokenid); v = DeliveryRules.reasons(in); }
+            final DeliveryRules.Verdict out = v;
+            ui.post(() -> then.accept(out));
+        })))));
+    }
+
+    /** One node command; the callback gets the reply, or null on no answer (or when cmd is null). */
+    private void ask(String cmd, java.util.function.Consumer<JSONObject> next) {
+        if (cmd == null) { next.accept(null); return; }
+        node.cmd(cmd, new NodeApi.Cb() {
+            @Override public void onResult(JSONObject j) { next.accept(j); }
+            @Override public void onError(String m) { next.accept(null); }
         });
+    }
+
+    /** The vendor's own listing for a shop (imported with ⇪), or null. */
+    private JSONObject listingFor(String shopId) {
+        String raw = db.getMeta("listing:" + shopId, "");
+        if (raw.isEmpty()) return null;
+        try { return new JSONObject(raw); } catch (Exception e) { return null; }
+    }
+
+    /** Minimum confirmations a payment coin needs before anything is sent: vendor setting, default 3, never below 1. */
+    private int minConf() {
+        try { return Math.max(1, Integer.parseInt(db.getMeta("minconf", String.valueOf(DeliveryRules.DEFAULT_MIN_CONF)))); }
+        catch (NumberFormatException e) { return DeliveryRules.DEFAULT_MIN_CONF; }
     }
 
     private void plainDeliver(final MerchDb.Order o, final String[] line, final String key, final boolean auto) {
         final String tokenid = line[1], qty = line[2];
         if (!nftSending.add(key)) return;
         refreshOrderIfTopmost(o.ref);
+        final boolean[] inCall = {true};
         CommsTransport.sendPayment(node, o.payaddr, qty, tokenid, o.ref, new CommsTransport.SendCb() {
             @Override public void onSent(final String txid) {
                 markSentAndMaybeAdvance(o, key, txid == null || txid.isEmpty() ? "sent" : txid, auto);
             }
             @Override public void onFailed(final String e) {
+                // Refused before anything reached the node: certainly not sent, the line is free again. Any later
+                // failure may have been posted: the line stays reserved until the vendor checks the history.
+                if (inCall[0]) io.execute(() -> DeliveryLedger.mark(db.getWritableDatabase(), ledgerKey(o.ref, line), DeliveryLedger.RELEASED));
                 // A StateNFT collection sold by an old .shop has no edition index — `send` fails with
                 // an opaque sendable:0; name the real cause for the vendor.
                 if (isKnownStateCollection(tokenid)) deliverFailed(o, key, "this is a StateNFT collection but the order names no edition — the buyer's miniMall is outdated", auto);
                 else deliverFailed(o, key, e, auto);
             }
         });
+        inCall[0] = false;
     }
 
     // ---- StateNFT piece delivery (state-replay transfer, confirm by coin departure) ----
@@ -880,6 +964,8 @@ public class MainActivity extends AppCompatActivity {
     private void markSentAndMaybeAdvance(final MerchDb.Order o, final String key, final String txid, final boolean auto) {
         io.execute(() -> {
             db.setMeta("nftsent:" + key, txid == null || txid.isEmpty() ? "sent" : txid);
+            MerchDb.Order fresh0 = db.order(o.ref);
+            if (fresh0 != null) for (String[] l : nftLines(fresh0)) if (lineKey(o.ref, l).equals(key)) DeliveryLedger.mark(db.getWritableDatabase(), ledgerKey(o.ref, l), DeliveryLedger.SENT);
             MerchDb.Order fresh = db.order(o.ref);
             boolean all = fresh != null;
             if (fresh != null) for (String[] l : nftLines(fresh)) {

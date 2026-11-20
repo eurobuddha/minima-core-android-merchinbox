@@ -59,6 +59,19 @@ final class DeliveryGuard {
         return null;
     }
 
+    /** What the vendor holds of a token (the node's {@code coins relevant:true tokenid:} reply), or null if unreadable. */
+    static BigDecimal heldAmount(String tokenid, JSONObject reply) {
+        JSONArray coins = reply == null || !reply.optBoolean("status", false) ? null : reply.optJSONArray("response");
+        if (coins == null) return null;
+        BigDecimal have = BigDecimal.ZERO;
+        for (int i = 0; i < coins.length(); i++) {
+            JSONObject c = coins.optJSONObject(i);
+            if (c == null || !tokenid.equalsIgnoreCase(c.optString("tokenid", "")) || c.optBoolean("spent", false)) continue;
+            try { have = have.add(new BigDecimal(c.optString("tokenamount", "0"))); } catch (Exception e) { return null; }
+        }
+        return have;
+    }
+
     /** The token record in a {@code tokens tokenid:} reply: an object, an {token:{…}} envelope, or a one-row list. */
     private static JSONObject record(JSONObject reply) {
         if (reply == null || !reply.optBoolean("status", false)) return null;
