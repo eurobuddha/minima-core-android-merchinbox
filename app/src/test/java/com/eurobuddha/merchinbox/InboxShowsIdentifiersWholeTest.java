@@ -58,7 +58,7 @@ public class InboxShowsIdentifiersWholeTest {
         m.type = MerchMessage.ORDER; m.ref = "ORD-AUTO"; m.from = BUYER; m.to = "0xME"; m.amount = "0.000000001"; m.currency = "Minima";
         m.buyerPayaddr = PAYADDR; m.items = "[{\"product\":\"x\",\"quantity\":1000,\"nftTokenId\":\"0x00\"}]";
         db.upsertOrder(m, "seller", COIN);
-        assertEquals(MerchDb.PAID, db.recordPayment("ORD-AUTO", "0.000000001", "0x00"));
+        assertEquals(MerchDb.PAID, db.recordPayment("ORD-AUTO", "0xC0FFEE", "0.000000001", "0x00"));
         Method a = MainActivity.class.getDeclaredMethod("maybeAutoDeliver", String.class); a.setAccessible(true);
         a.invoke(activity, "ORD-AUTO");
         org.mockito.Mockito.verifyNoInteractions(node);

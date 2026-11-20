@@ -320,10 +320,10 @@ public class MainActivity extends AppCompatActivity {
         String ref = hexToText(refHex);
         if (ref.isEmpty()) return false;
         MerchDb.Order o = db.order(ref);
-        if (o == null || o.paid) return false;   // replay guard: backfill/grow-passes/restarts re-see coins (recordPayment guards too)
+        if (o == null || o.paid) return false;   // PAID locks; any other coin is counted once (recordPayment keeps its id)
         String amount = MerchDb.coinAmount(coin);   // a token coin's tokenamount, never the Minima amount backing it
         String tokenid = coin.optString("tokenid", "0x00");
-        String result = db.recordPayment(ref, amount, tokenid);
+        String result = db.recordPayment(ref, coinid, amount, tokenid);   // each coin counted once
         // Auto-deliver only on a clean PAID (the token received is the order currency's) — never
         // UNDERPAID/WRONG_TOKEN, and maybeAutoDeliver also skips a TOKEN_MISMATCH order. Queued, drained at scan end.
         if (MerchDb.PAID.equals(result)) pendingAutoDeliver.add(ref);

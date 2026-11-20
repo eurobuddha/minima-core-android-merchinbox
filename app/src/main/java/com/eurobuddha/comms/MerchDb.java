@@ -105,32 +105,54 @@ public class MerchDb extends SQLiteOpenHelper implements CommsScanner.MetaStore 
     }
 
     /**
-     * Record a payment coin and run the verification gate: PAID only if the coin's amount >= the ordered
-     * total AND the token actually received is the order CURRENCY's token ({@link MerchMessage#tokenFor}; the
-     * stored token id is not trusted: rows from older versions hold it as the buyer sent it); else UNDERPAID /
-     * WRONG_TOKEN. Only PAID sets {@code paid}. The first payment coin decides, as before: a replay or a later
-     * coin changes nothing (returns null). Never downgrades a fulfilled order.
-     * Returns the resulting status (or null if no such order, or a payment was already recorded).
+     * Record one payment coin (security review 2026-11-20). Coins of the order CURRENCY's token
+     * ({@link MerchMessage#tokenFor}; the stored token id is not trusted) for this ref add up, exactly, each
+     * coin id counted once (as the desktop's recordPayment does): the order is PAID, and only then locked, once
+     * their sum reaches what is due ({@link #due}) and that is above zero. A coin of another token never pays
+     * and never blocks a later honest payment (a third party can stamp any ref on a tiny coin). Status moves
+     * from PENDING / UNDERPAID / WRONG_TOKEN only, never back from PAID or a vendor-advanced status.
+     * Returns the outcome (PAID / UNDERPAID / WRONG_TOKEN), or null when nothing was counted: no such order,
+     * already PAID, or this coin counted before.
      */
-    public String recordPayment(String ref, String paidAmount, String paidTokenid) {
+    public String recordPayment(String ref, String coinid, String paidAmount, String paidTokenid) {
         Order o = order(ref);
-        if (o == null || o.paid || !o.paidTokenid.isEmpty()) return null;
-        String result, want = MerchMessage.tokenFor(o.currency);
+        if (o == null || o.paid || coinid == null || coinid.isEmpty()) return null;
+        String counted = "paycoin:" + coinid.toLowerCase(java.util.Locale.ROOT);
+        if (!getMeta(counted, "").isEmpty()) return null;
+        String want = MerchMessage.tokenFor(o.currency);
         boolean tokenOk = want != null && want.equalsIgnoreCase(paidTokenid);
-        boolean amountOk;   // exact decimals; an order total that is not above zero is never paid
-        try { BigDecimal due = new BigDecimal(o.amount); amountOk = due.signum() > 0 && new BigDecimal(paidAmount).compareTo(due) >= 0; }
-        catch (Exception e) { amountOk = false; }
-        if (!tokenOk) result = WRONG_TOKEN;
-        else if (!amountOk) result = UNDERPAID;
-        else result = PAID;
-
+        boolean started = want != null && want.equalsIgnoreCase(o.paidTokenid);   // right-token coins already counted
+        String result;
         ContentValues v = new ContentValues();
-        v.put("paid", PAID.equals(result) ? 1 : 0); v.put("paidamount", paidAmount); v.put("paidtokenid", paidTokenid == null ? "" : paidTokenid);
-        // only move the lifecycle status forward from PENDING (don't clobber CONFIRMED/SHIPPED/…)
-        if (PENDING.equals(o.status) || o.status == null || o.status.isEmpty()) v.put("status", result);
-        getWritableDatabase().update(ORD, v, "ref=?", new String[]{ref});
+        if (!tokenOk) {
+            result = WRONG_TOKEN;
+            if (!started) { v.put("paidamount", paidAmount); v.put("paidtokenid", paidTokenid == null ? "" : paidTokenid); }
+        } else {
+            BigDecimal sum;
+            try { sum = new BigDecimal(paidAmount); if (started) sum = sum.add(new BigDecimal(o.paidAmount)); }
+            catch (Exception e) { sum = BigDecimal.ZERO; }
+            boolean full;   // exact decimals; a due amount that is not above zero is never paid
+            try { BigDecimal due = new BigDecimal(due(o)); full = due.signum() > 0 && sum.compareTo(due) >= 0; }
+            catch (Exception e) { full = false; }
+            result = full ? PAID : UNDERPAID;
+            v.put("paid", full ? 1 : 0); v.put("paidamount", sum.toPlainString()); v.put("paidtokenid", paidTokenid);
+        }
+        boolean movable = o.status == null || o.status.isEmpty() || PENDING.equals(o.status) || WRONG_TOKEN.equals(o.status)
+                || (UNDERPAID.equals(o.status) && !WRONG_TOKEN.equals(result));
+        if (movable) v.put("status", result);
+        SQLiteDatabase db = getWritableDatabase();
+        db.beginTransaction();
+        try {
+            ContentValues m = new ContentValues(); m.put("k", counted); m.put("v", ref);
+            db.insertWithOnConflict(META, null, m, SQLiteDatabase.CONFLICT_REPLACE);
+            if (v.size() > 0) db.update(ORD, v, "ref=?", new String[]{ref});
+            db.setTransactionSuccessful();
+        } finally { db.endTransaction(); }
         return result;
     }
+
+    /** What is due for an order: the buyer's own figure (the Inbox does not yet recompute it). */
+    public String due(Order o) { return o.amount; }
 
     /** What a payment coin carries in its own token: a token coin's {@code tokenamount} (its {@code amount} is the
      *  Minima that backs the token), a Minima coin's {@code amount}. Missing = "0", which never pays. */
