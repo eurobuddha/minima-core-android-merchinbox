@@ -24,7 +24,7 @@ public class MerchDb extends SQLiteOpenHelper implements CommsScanner.MetaStore 
     public static final String PENDING = "PENDING", PAID = "PAID", CONFIRMED = "CONFIRMED",
             SHIPPED = "SHIPPED", DELIVERED = "DELIVERED", UNDERPAID = "UNDERPAID", WRONG_TOKEN = "WRONG_TOKEN",
             INQUIRY = "INQUIRY",
-            /** An order whose stated token id is not its currency's token (or whose currency is not payable). */
+            /** Status kept by orders stored before the separate mismatch flag ({@link #mismatch}); not set any more. */
             TOKEN_MISMATCH = "TOKEN_MISMATCH";
 
     public MerchDb(Context ctx) { super(ctx, DB, null, VERSION); }
@@ -61,7 +61,8 @@ public class MerchDb extends SQLiteOpenHelper implements CommsScanner.MetaStore 
     /** Insert an incoming order/inquiry (dedup on ref; never overwrites an existing one's status).
      *  The token an order is paid in follows from its currency ({@link MerchMessage#tokenFor}), never from the token id
      *  it states: the row holds the currency's token ("" when the currency is not payable), and an ORDER whose stated
-     *  token id disagrees is kept but flagged {@link #TOKEN_MISMATCH} (never auto-delivered). */
+     *  token id disagrees, or whose currency is not payable, is kept with a mismatch flag ({@link #mismatch}) that
+     *  lives apart from the status, so no status change can make it deliverable. */
     public boolean upsertOrder(MerchMessage m, String role, String coinid) {
         String want = MerchMessage.tokenFor(m.currency);
         boolean mismatch = MerchMessage.ORDER.equals(m.type) && MerchMessage.tokenProblem(m.currency, m.tokenid) != null;
@@ -74,10 +75,25 @@ public class MerchDb extends SQLiteOpenHelper implements CommsScanner.MetaStore 
         v.put("items", m.items); v.put("product", m.product); v.put("amount", m.amount);
         v.put("currency", m.currency); v.put("tokenid", want == null ? "" : want); v.put("shipping", m.shipping);
         v.put("delivery", m.delivery); v.put("message", m.message);
-        v.put("status", MerchMessage.INQUIRY.equals(m.type) ? INQUIRY : mismatch ? TOKEN_MISMATCH : PENDING); v.put("coinid", coinid);
+        v.put("status", MerchMessage.INQUIRY.equals(m.type) ? INQUIRY : PENDING); v.put("coinid", coinid);
         v.put("date", m.date > 0 ? m.date : System.currentTimeMillis()); v.put("read", 0);
-        long id = getWritableDatabase().insertWithOnConflict(ORD, null, v, SQLiteDatabase.CONFLICT_IGNORE);
-        return id != -1;
+        SQLiteDatabase db = getWritableDatabase();
+        db.beginTransaction();
+        try {
+            long id = db.insertWithOnConflict(ORD, null, v, SQLiteDatabase.CONFLICT_IGNORE);
+            if (id != -1 && mismatch) {   // only with the row it belongs to: a later message with the same ref changes nothing
+                ContentValues f = new ContentValues(); f.put("k", "mismatch:" + m.ref); f.put("v", "1");
+                db.insertWithOnConflict(META, null, f, SQLiteDatabase.CONFLICT_REPLACE);
+            }
+            db.setTransactionSuccessful();
+            return id != -1;
+        } finally { db.endTransaction(); }
+    }
+
+    /** An order whose stated token id is not its currency's token, or whose currency is not payable: its NFTs are
+     *  never sent, whatever its status becomes. Rows stored before this flag carry the TOKEN_MISMATCH status. */
+    public boolean mismatch(Order o) {
+        return o != null && (TOKEN_MISMATCH.equals(o.status) || "1".equals(getMeta("mismatch:" + o.ref, "")));
     }
 
     public List<Order> orders() {

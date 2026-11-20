@@ -31,12 +31,13 @@ public class MerchDbTokenTest {
     @Test public void anOrderSayingMxUsdWithTheMinimaIdIsFlaggedAndNotPaidByMinima() {
         assertTrue(db.upsertOrder(order("ORD-A", MerchMessage.ORDER, "USDT", "0x00"), "seller", "0xC01"));
         MerchDb.Order o = db.order("ORD-A");
-        assertEquals(MerchDb.TOKEN_MISMATCH, o.status);
+        assertTrue(db.mismatch(o));
+        assertEquals(MerchDb.PENDING, o.status);
         assertEquals(MXUSD, o.tokenid);
         assertEquals(MerchDb.WRONG_TOKEN, db.recordPayment("ORD-A", "0x01CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC", "5", "0x00"));
         o = db.order("ORD-A");
         assertFalse("never marked paid in the stated token", o.paid);
-        assertEquals(MerchDb.TOKEN_MISMATCH, o.status);
+        assertEquals(MerchDb.WRONG_TOKEN, o.status);
         assertEquals("0x00", o.paidTokenid);
         assertNull("a coin is counted once", db.recordPayment("ORD-A", "0x01CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC", "5", "0x00"));
         assertEquals("a later honest payment still pays", MerchDb.PAID, db.recordPayment("ORD-A", "0xFEED", "5", MXUSD));
@@ -55,6 +56,7 @@ public class MerchDbTokenTest {
     @Test public void theCurrencysTokenInFullIsPaid() {
         db.upsertOrder(order("ORD-B", MerchMessage.ORDER, "USDT", MXUSD.toLowerCase()), "seller", "0xC02");
         assertEquals(MerchDb.PENDING, db.order("ORD-B").status);
+        assertFalse(db.mismatch(db.order("ORD-B")));
         assertEquals(MerchDb.PAID, db.recordPayment("ORD-B", "0x04CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC", "5", MXUSD));
         assertTrue(db.order("ORD-B").paid);
 
@@ -66,7 +68,7 @@ public class MerchDbTokenTest {
 
     @Test public void anUnpayableCurrencyIsFlaggedAndNeverPaid() {
         db.upsertOrder(order("ORD-D", MerchMessage.ORDER, "BTC", "0x00"), "seller", "0xC04");
-        assertEquals(MerchDb.TOKEN_MISMATCH, db.order("ORD-D").status);
+        assertTrue(db.mismatch(db.order("ORD-D")));
         assertEquals("", db.order("ORD-D").tokenid);
         assertEquals(MerchDb.WRONG_TOKEN, db.recordPayment("ORD-D", "0x06CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC", "5", "0x00"));
         assertFalse(db.order("ORD-D").paid);
@@ -128,6 +130,20 @@ public class MerchDbTokenTest {
         assertEquals(MerchDb.PAID, db.recordPayment("ORD-P", "0xB3", "2.5", "0x00"));
         assertEquals("5.0", db.order("ORD-P").paidAmount);
         assertTrue(db.order("ORD-P").paid);
+    }
+
+    @Test public void theMismatchFlagSurvivesEveryStatusAndCannotBeAddedOrRemovedByARepeat() {
+        db.upsertOrder(order("ORD-M", MerchMessage.ORDER, "Minima", MXUSD), "seller", "0xC12");
+        assertEquals(MerchDb.PAID, db.recordPayment("ORD-M", "0xD1", "5", "0x00"));
+        for (String st : new String[]{MerchDb.CONFIRMED, MerchDb.SHIPPED, MerchDb.DELIVERED, MerchDb.PAID}) {
+            db.setStatus("ORD-M", st);
+            assertTrue(st, db.mismatch(db.order("ORD-M")));
+        }
+        assertFalse(db.upsertOrder(order("ORD-M", MerchMessage.ORDER, "Minima", "0x00"), "seller", "0xC13"));
+        assertTrue(db.mismatch(db.order("ORD-M")));
+        db.upsertOrder(order("ORD-N", MerchMessage.ORDER, "Minima", "0x00"), "seller", "0xC14");
+        assertFalse(db.upsertOrder(order("ORD-N", MerchMessage.ORDER, "Minima", MXUSD), "seller", "0xC15"));
+        assertFalse(db.mismatch(db.order("ORD-N")));
     }
 
     @Test public void anInquiryStaysAnInquiry() {

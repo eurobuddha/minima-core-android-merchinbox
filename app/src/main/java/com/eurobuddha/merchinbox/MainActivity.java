@@ -325,7 +325,7 @@ public class MainActivity extends AppCompatActivity {
         String tokenid = coin.optString("tokenid", "0x00");
         String result = db.recordPayment(ref, coinid, amount, tokenid);   // each coin counted once
         // Auto-deliver only on a clean PAID (the token received is the order currency's) — never
-        // UNDERPAID/WRONG_TOKEN, and maybeAutoDeliver also skips a TOKEN_MISMATCH order. Queued, drained at scan end.
+        // UNDERPAID/WRONG_TOKEN, and nothing is sent for a mismatched order (MerchDb.mismatch). Queued, drained at scan end.
         if (MerchDb.PAID.equals(result)) pendingAutoDeliver.add(ref);
         return result != null;
     }
@@ -545,12 +545,12 @@ public class MainActivity extends AppCompatActivity {
             st.addView(paid);
         }
         st.setPadding(0, 0, 0, dp(10)); body.addView(st);
-        if (MerchDb.TOKEN_MISMATCH.equals(o.status)) {
+        if (db.mismatch(o)) {
             String want = MerchMessage.tokenFor(o.currency);
             body.addView(label(want == null
-                    ? "This order asks to be paid in \"" + o.currency + "\", which is neither Minima nor MxUSD. It is never marked paid or auto-delivered."
-                    : "This order names a token that is not its currency's. It counts as paid only in " + MerchMessage.tokenName(want)
-                            + "\n" + want + "\nand is never auto-delivered."));
+                    ? "This order asks to be paid in \"" + o.currency + "\", which is neither Minima nor MxUSD. It is never marked paid, and its NFTs are never sent from this app."
+                    : "This order names a token that is not its currency's. Its NFTs are never sent from this app, whatever its status, and a payment counts only in "
+                            + MerchMessage.tokenName(want) + "\n" + want));
         }
 
         if (!inquiry) {
@@ -688,7 +688,7 @@ public class MainActivity extends AppCompatActivity {
             return t;
         }
         LinearLayout wrap = new LinearLayout(this); wrap.setOrientation(LinearLayout.VERTICAL);
-        boolean ready = o.paid && o.payaddr != null && !o.payaddr.isEmpty();
+        boolean ready = o.paid && o.payaddr != null && !o.payaddr.isEmpty() && !db.mismatch(o);
         boolean inFlight = nftSending.contains(key);
         TextView b = button(inFlight ? "Sending…" : "Send " + label + " to buyer", ready && !inFlight);
         LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
@@ -709,7 +709,8 @@ public class MainActivity extends AppCompatActivity {
         wrap.addView(b);
         if (!ready) {
             TextView why = new TextView(this);
-            why.setText(!o.paid ? "Available once the order is paid." : "The order didn't include a buyer pay address.");
+            why.setText(db.mismatch(o) ? "Not sent: this order names a token that is not its currency's."
+                    : !o.paid ? "Available once the order is paid." : "The order didn't include a buyer pay address.");
             why.setTextColor(Design.DIM2); why.setTextSize(11f); why.setPadding(0, dp(2), 0, 0);
             wrap.addView(why);
         }
@@ -725,6 +726,7 @@ public class MainActivity extends AppCompatActivity {
         // The pay address is buyer-supplied chain data interpolated into a node command — validate hard.
         if (!Util.isValidAddress(o.payaddr)) { deliverFailed(o, key, "buyer pay address is malformed", auto); return; }
         if (!Util.isValidHexId(tokenid)) { deliverFailed(o, key, "token id is malformed", auto); return; }
+        if (db.mismatch(db.order(o.ref))) { deliverFailed(o, key, "this order names a token that is not its currency's; its NFTs are never sent", auto); return; }
         guardDelivery(o, line, key, auto, () -> {
             if ("1".equals(line[4])) { collectionDeliver(o, line, auto); return; }
             if (!"0".equals(line[3])) { stateNftDeliver(o, line, auto); return; }
