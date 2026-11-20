@@ -136,7 +136,9 @@ final class DeliveryRules {
             if (c == null || !want.equalsIgnoreCase(c.optString("tokenid", "")) || c.optBoolean("spent", false)) continue;
             String h = CommsScanner.statePort(c, 1);   // no port 1, or not hex UTF-8, is never a payment (C1)
             if (o.ref.isEmpty() || h == null || !o.ref.equals(text(h))) continue;
-            if (!in.nonce.isEmpty() && !MerchMessage.commitment(in.nonce).equalsIgnoreCase(String.valueOf(CommsScanner.statePort(c, 2)))) continue;   // not this buyer's payment (H1)
+            // a coin carrying a commitment pays only the order with that secret; a reference-only order only coins without one (delta M-1)
+            String cc = CommsScanner.statePort(c, 2);
+            if (!(in.nonce.isEmpty() ? cc == null : MerchMessage.commitment(in.nonce).equalsIgnoreCase(cc))) continue;
             String id = c.optString("coinid", "").toLowerCase(java.util.Locale.ROOT);
             String owner = in.counted.get(id);
             if (owner != null && !owner.isEmpty() && !owner.equals(o.ref)) { v.reasons.add("coin " + id + " was counted for order " + owner); continue; }

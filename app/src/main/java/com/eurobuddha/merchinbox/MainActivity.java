@@ -308,13 +308,18 @@ public class MainActivity extends AppCompatActivity {
             if (fresh) recheck(db.order(m.ref));   // what is due, from the vendor's own listing
             return fresh;
         }
+        // A message on an existing ref is stored only from that order's own buyer, with its sender (delta review M-2).
         if (MerchMessage.INQUIRY.equals(m.type)) {
             boolean rowNew = db.upsertOrder(m, "seller", coinid);   // ensures the inquiry row exists
-            boolean chatNew = db.insertChat(m.ref, true, m.message, m.randomid, m.date > 0 ? m.date : System.currentTimeMillis());
+            MerchDb.Order o = db.order(m.ref);
+            if (o == null || !m.from.equals(o.counterparty)) return rowNew;
+            boolean chatNew = db.insertChat(m.ref, true, m.message, m.randomid, m.date > 0 ? m.date : System.currentTimeMillis(), m.from);
             return rowNew || chatNew;
         }
         if (MerchMessage.BUYER_REPLY.equals(m.type)) {
-            return db.insertChat(m.ref, true, m.message, m.randomid, m.date > 0 ? m.date : System.currentTimeMillis());
+            MerchDb.Order o = db.order(m.ref);
+            if (o == null || !m.from.equals(o.counterparty)) return false;
+            return db.insertChat(m.ref, true, m.message, m.randomid, m.date > 0 ? m.date : System.currentTimeMillis(), m.from);
         }
         return false;
     }
@@ -323,8 +328,8 @@ public class MainActivity extends AppCompatActivity {
     private boolean routePayment(String coinid, com.eurobuddha.comms.Opened ignored, JSONObject coin) {
         String refHex = CommsScanner.statePort(coin, 1);
         if (refHex == null) return false;
-        String ref = hexToText(refHex);
-        if (ref.isEmpty()) return false;
+        String ref = DeliveryRules.text(refHex);   // strict: hex of valid UTF-8 only (delta review L-f)
+        if (!MerchMessage.validRef(ref)) return false;
         MerchDb.Order o = db.order(ref);
         if (o == null || o.paid) return false;   // PAID locks; any other coin is counted once (recordPayment keeps its id)
         String amount = MerchDb.coinAmount(coin);   // a token coin's tokenamount, never the Minima amount backing it
@@ -657,7 +662,8 @@ public class MainActivity extends AppCompatActivity {
             body.addView(card(itemsText(o)));
             body.addView(kv("Total", o.amount + " " + dispCurrency(o)));
             if (db.conflict(o)) {
-                TextView cf = label("Two buyers sent orders with this reference (it is public once paid). Nothing is sent for it: ask the buyer who paid, by message, before you send anything by hand outside this app.");
+                TextView cf = label("Another order arrived with this reference (a reference is public once paid), so nothing is sent for it while it is contested. "
+                        + "A payment counts only for the order whose secret it commits to; the other orders with this reference are listed below.");
                 cf.setTextColor(Design.RED); body.addView(cf);
             } else if (db.nonce(o).isEmpty()) body.addView(label("This order came from an older Shop without a payment secret: its payment is matched by its reference only."));
             if (listingFor(o.shopId) != null) body.addView(label(listingInUse(db.getMeta("listingsigned:" + o.shopId, ""))));
@@ -686,6 +692,7 @@ public class MainActivity extends AppCompatActivity {
             }
         }
         body.addView(copyRow("Buyer key", o.counterparty, o.counterparty));
+        if (!inquiry) addContenders(body, o);
 
         // status actions (orders only — an enquiry has no lifecycle)
         if (!inquiry) {
@@ -697,6 +704,31 @@ public class MainActivity extends AppCompatActivity {
         body.addView(sectionLabel(inquiry ? "Conversation" : "Message the buyer"));
         body.addView(replyRow(o));
         return col;
+    }
+
+    /** The other orders that arrived with this ref (delta review H-1): sender, buyer address and items whole, which one
+     *  a payment commits to, and the one action the vendor has: make THAT order the order of record. */
+    private void addContenders(LinearLayout body, final MerchDb.Order o) {
+        JSONArray cs = db.contenders(o.ref);
+        if (cs.length() == 0) return;
+        int committed = db.committedContender(o);
+        body.addView(sectionLabel("Other orders with this reference"));
+        for (int i = 0; i < cs.length(); i++) {
+            JSONObject c = cs.optJSONObject(i); if (c == null) continue;
+            MerchDb.Order x = new MerchDb.Order(); x.items = c.optString("items"); x.product = c.optString("product");
+            body.addView(card("Sender " + c.optString("from") + "\nBuyer address " + c.optString("payaddr") + "\n" + itemsText(x)
+                    + "\nTotal " + c.optString("amount") + " " + MerchMessage.label(c.optString("currency"))
+                    + (c.optString("commitment").isEmpty() ? "\nNo payment secret (an older Shop)." : "")
+                    + (i == committed ? "\nThe payment at your address commits to THIS order." : "")));
+        }
+        if (committed >= 0) {
+            TextView b = button("Make the order the payment commits to the order of record", false);
+            b.setOnClickListener(v -> io.execute(() -> {
+                if (db.switchToCommitted(o.ref)) recheck(db.order(o.ref));
+                ui.post(() -> refreshOrderIfTopmost(o.ref));
+            }));
+            body.addView(b);
+        }
     }
 
     private View statusButtons(final MerchDb.Order o) {
@@ -1434,13 +1466,6 @@ public class MainActivity extends AppCompatActivity {
             java.io.ByteArrayOutputStream bos = new java.io.ByteArrayOutputStream();
             byte[] buf = new byte[4096]; int n; while ((n = is.read(buf)) > 0) bos.write(buf, 0, n);
             return new JSONObject(new String(bos.toByteArray(), StandardCharsets.UTF_8)).optString("shopName", "");
-        } catch (Exception e) { return ""; }
-    }
-
-    private static String hexToText(String hex) {
-        try {
-            String h = hex.startsWith("0x") ? hex.substring(2) : hex;
-            return new String(Hex.from("0x" + h), StandardCharsets.UTF_8);
         } catch (Exception e) { return ""; }
     }
 
