@@ -132,6 +132,15 @@ final class Listing {
         try { return new JSONArray(raw); } catch (Throwable e) { return null; }
     }
 
+    private static List<String> bundledList(JSONArray items) {
+        List<String> out = new ArrayList<>();
+        for (int i = 0; items != null && i < items.length(); i++) {
+            JSONObject it = items.optJSONObject(i);
+            if (it != null && it.optInt("nftBundle", 0) > 0) out.add(it.optString("nftTokenId", "").toLowerCase(java.util.Locale.ROOT));
+        }
+        return out;
+    }
+
     /** A buyer's number, or null unless it is a plain decimal (no exponent) with at most {@code whole} digits
      *  before the point and {@code decimals} after it; checked on the text first, so "1E+999999999" never
      *  becomes a huge number or a huge string (security review, M1). */
@@ -175,6 +184,7 @@ final class Listing {
         if (items == null || items.length() == 0) problems.add("the order has no items you can read");
         JSONArray products = listing.optJSONArray("products");
         java.util.Map<JSONObject, BigDecimal> perProduct = new java.util.IdentityHashMap<>();   // all lines of one product together (L6)
+        java.util.Set<String> bundled = new java.util.HashSet<>(), pieced = new java.util.HashSet<>();   // a token as a whole collection and as pieces (L1)
         if (items != null) for (int i = 0; i < items.length(); i++) {
             JSONObject it = items.optJSONObject(i);
             if (it == null) { problems.add("an item cannot be read"); continue; }
@@ -199,11 +209,14 @@ final class Listing {
             BigDecimal stated = bounded(it.optString("unitPrice", ""), 30, 44);
             if (stated == null || stated.compareTo(price) != 0) { problems.add(what + ": the order's price " + cap(it.optString("unitPrice", "(none)"), 60) + " is not your price " + price.toPlainString()); continue; }
             due = due.add(price.multiply(qty));
+            (bundle == 1 ? bundled : pieced).add(token.toLowerCase(java.util.Locale.ROOT));
             BigDecimal together = perProduct.getOrDefault(match, BigDecimal.ZERO).add(qty);
             perProduct.put(match, together);
             int stock = bundle == 1 || idx > 0 ? 1 : Math.max(1, match.optInt("maxUnits", 10));
             if (together.compareTo(BigDecimal.valueOf(stock)) > 0) problems.add(what + ": the order's lines together ask for " + together.toPlainString() + ", more than you list (" + stock + ")");
         }
+        for (String t : bundled) if (pieced.contains(t) || java.util.Collections.frequency(bundledList(items), t) > 1)
+            problems.add("the order asks for the complete collection of token " + cap(t, 80) + " and for more of the same token");
         BigDecimal fee = null;
         JSONArray shipping = listing.optJSONArray("shipping");
         for (int j = 0; shipping != null && j < shipping.length(); j++) {

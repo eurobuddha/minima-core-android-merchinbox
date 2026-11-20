@@ -22,7 +22,7 @@ public final class CommsTransport {
 
     /** Supported pay tokens (same as miniMall). */
     public static final String MINIMA = "0x00";
-    public static final String USDT   = "0x7D39745FBD29049BE29850B55A18BF550E4D442F930F86266E34193D89042A90";
+    public static final String MXUSD  = "0x7D39745FBD29049BE29850B55A18BF550E4D442F930F86266E34193D89042A90";
 
     public interface SendCb {
         void onSent(String txpowid);

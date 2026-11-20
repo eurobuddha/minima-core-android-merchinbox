@@ -762,10 +762,18 @@ public class MainActivity extends AppCompatActivity {
                 int q = Math.max(1, it.optInt("quantity", 1));
                 int idx = Math.max(0, it.optInt("nftStateIdx", 0));
                 int bundle = it.optInt("nftBundle", 0) > 0 ? 1 : 0;
-                out.add(new String[]{it.optString("product", "NFT"), tokenid, String.valueOf(q), String.valueOf(idx), String.valueOf(bundle), String.valueOf(i)});
+                String[] l = {it.optString("product", "NFT"), tokenid, String.valueOf(q), String.valueOf(idx), String.valueOf(bundle), String.valueOf(i), "0"};
+                for (String[] before : out) if (baseKey("", before).equals(baseKey("", l))) { l[6] = "1"; break; }   // a repeat of an earlier line (L5)
+                out.add(l);
             }
         } catch (Throwable ignored) {}
         return out;
+    }
+
+    /** A StateNFT piece's coin carries exactly one unit of its token (review L2). */
+    private static boolean oneUnit(JSONObject c) {
+        try { return new java.math.BigDecimal(c.optString("tokenamount", "")).compareTo(java.math.BigDecimal.ONE) == 0; }
+        catch (NumberFormatException e) { return false; }
     }
 
     /** The delivery ledger's key for one order line: the order ref and the line's index in the order (L6). */
@@ -774,6 +782,11 @@ public class MainActivity extends AppCompatActivity {
     /** Meta/set key for one deliverable line. Plain NFTs keep the historical ref:tokenid shape (so
      *  existing nftsent: metas survive); pieces append #idx; complete-collection bundles #ALL. */
     private static String lineKey(String ref, String[] line) {
+        if (line.length > 6 && "1".equals(line[6])) return baseKey(ref, line) + "@" + line[5];   // a repeated line gets its own key (L5)
+        return baseKey(ref, line);
+    }
+
+    private static String baseKey(String ref, String[] line) {
         if ("1".equals(line[4])) return ref + ":" + line[1] + "#ALL";
         return ref + ":" + line[1] + ("0".equals(line[3]) ? "" : "#" + line[3]);
     }
@@ -896,7 +909,12 @@ public class MainActivity extends AppCompatActivity {
                 in.counted.put(id, db.getMeta("paycoin:" + id, ""));
             }
             DeliveryRules.Verdict v = DeliveryRules.reasons(in);
-            if (!v.product.isEmpty()) { in.delivered = DeliveryLedger.delivered(w, v.product); in.inflight = DeliveryLedger.inflight(w, tokenid); v = DeliveryRules.reasons(in); }
+            if (!v.product.isEmpty()) {
+                String tokenPrefix = v.product.substring(0, v.product.lastIndexOf('|', v.product.lastIndexOf('|') - 1) + 1);   // shop|token|
+                in.delivered = DeliveryLedger.delivered(w, v.product); in.inflight = DeliveryLedger.inflight(w, tokenid);
+                in.deliveredOfToken = DeliveryLedger.deliveredOfToken(w, tokenPrefix); in.bundleTaken = DeliveryLedger.bundleTaken(w, tokenPrefix);
+                v = DeliveryRules.reasons(in);
+            }
             final DeliveryRules.Verdict out = v;
             ui.post(() -> then.accept(out));
         })))));
@@ -1028,7 +1046,7 @@ public class MainActivity extends AppCompatActivity {
                 JSONArray arr = j.optJSONArray("response");
                 if (arr != null) for (int i = 0; i < arr.length(); i++) {
                     JSONObject c = arr.optJSONObject(i);
-                    if (c != null && !StateNft.isBuried(c) && idx.equals(StateNft.stamped(c))) { coin = c; break; }
+                    if (c != null && !StateNft.isBuried(c) && idx.equals(StateNft.stamped(c)) && oneUnit(c)) { coin = c; break; }   // exactly 1 unit (L2)
                 }
                 if (coin == null) {
                     // Coin gone. If WE posted the transfer earlier, its departure IS the delivery.
@@ -1103,7 +1121,7 @@ public class MainActivity extends AppCompatActivity {
                     // Same refusals as a single transfer: buried, unstamped (creator bypass live),
                     // or state this app won't replay.
                     if (StateNft.isBuried(c) || StateNft.stamped(c) == null
-                            || !StateNft.replayableState(c) || StateNft.safeAmount(c).isEmpty()) continue;
+                            || !StateNft.replayableState(c) || StateNft.safeAmount(c).isEmpty() || !oneUnit(c)) continue;   // exactly 1 unit (L2)
                     coins.add(c);
                 }
                 if (coins.isEmpty()) {
@@ -1364,7 +1382,7 @@ public class MainActivity extends AppCompatActivity {
 
     private String dispCurrency(MerchDb.Order o) {
         if (!o.currency.isEmpty()) return MerchMessage.label(o.currency);   // the wire value "USDT" is MxUSD on Minima
-        return CommsTransport.USDT.equalsIgnoreCase(o.tokenid) ? "MxUSD" : "Minima";
+        return CommsTransport.MXUSD.equalsIgnoreCase(o.tokenid) ? "MxUSD" : "Minima";
     }
     private String shippingLabel(String s) {
         if ("uk".equalsIgnoreCase(s)) return "UK shipping";

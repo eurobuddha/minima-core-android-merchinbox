@@ -57,6 +57,25 @@ final class DeliveryLedger {
         return t;
     }
 
+    /** Units of every product of one token in one shop reserved or sent, and whether one of them is the complete
+     *  collection (review L1: a complete collection uses every piece's stock, and a piece uses the collection's). */
+    static BigDecimal deliveredOfToken(SQLiteDatabase db, String tokenPrefix) { return like(db, tokenPrefix, false); }
+    static boolean bundleTaken(SQLiteDatabase db, String tokenPrefix) { return like(db, tokenPrefix, true).signum() > 0; }
+
+    private static BigDecimal like(SQLiteDatabase db, String prefix, boolean bundlesOnly) {
+        BigDecimal t = BigDecimal.ZERO;
+        try (Cursor c = db.rawQuery("SELECT v FROM meta WHERE k LIKE 'ledger:%'", null)) {
+            while (c.moveToNext()) {
+                JSONObject r;
+                try { r = new JSONObject(c.getString(0)); } catch (org.json.JSONException e) { continue; }
+                String product = r.optString("product");
+                if (RELEASED.equals(r.optString("state", RESERVED)) || !product.startsWith(prefix) || bundlesOnly && !product.endsWith("|1")) continue;
+                try { t = t.add(new BigDecimal(r.optString("qty", "0"))); } catch (NumberFormatException ignored) {}
+            }
+        }
+        return t;
+    }
+
     /** Reserve a line for sending, or the reason it may not be sent (once only, stock across orders, holding). */
     static String reserve(SQLiteDatabase db, String lineKey, String product, String tokenid, BigDecimal qty, BigDecimal stock, BigDecimal held) {
         db.beginTransaction();

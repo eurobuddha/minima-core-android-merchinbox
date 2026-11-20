@@ -55,6 +55,8 @@ final class DeliveryRules {
         String lineState = "";        // DeliveryLedger state of this line
         boolean resuming;             // Pandamonium: this line's delivery journal already exists (it only resumes)
         BigDecimal delivered = BigDecimal.ZERO, inflight = BigDecimal.ZERO;
+        BigDecimal deliveredOfToken = BigDecimal.ZERO;   // every product of this token in this shop (L1)
+        boolean bundleTaken;                             // its complete collection is reserved or sent (L1)
         JSONObject tokenReply, holdingsReply, paymentReply;
         long tip;                     // current chain height
         int minConf = DEFAULT_MIN_CONF;
@@ -105,6 +107,8 @@ final class DeliveryRules {
         else {
             String t = DeliveryGuard.token(tokenid, in.tokenReply);
             if (t != null) v.reasons.add(t);
+            else if ((piece || bundle) && !StateNft.isStateNftScript(script(in.tokenReply)))   // L2
+                v.reasons.add("token " + tokenid + " is not a StateNFT collection, so it has no editions to send");
         }
 
         // 3 + 5. stock across orders, holding, once only (a resumed Pandamonium journal is its own reservation)
@@ -112,6 +116,8 @@ final class DeliveryRules {
         if (!in.resuming) {
             if (DeliveryLedger.RESERVED.equals(in.lineState)) v.reasons.add("this line's send did not finish and may have gone: check your wallet's history first");
             if (DeliveryLedger.SENT.equals(in.lineState)) v.reasons.add("this line was already sent");
+            if (bundle && in.deliveredOfToken.signum() > 0) v.reasons.add("pieces of this collection were already delivered or are being sent: the complete collection is no longer whole");
+            if (!bundle && in.bundleTaken) v.reasons.add("the complete collection of this token was already delivered or is being sent");
             if (v.stock.signum() > 0 && in.delivered.add(v.qty).compareTo(v.stock) > 0)
                 v.reasons.add("you list " + v.stock.toPlainString() + " of this product and " + in.delivered.toPlainString() + " are already delivered or being sent");
             if (v.held == null) v.reasons.add("your holdings of token " + tokenid + " could not be read");
@@ -143,6 +149,15 @@ final class DeliveryRules {
         if (v.due == null || v.due.signum() <= 0 || v.paid.compareTo(v.due) < 0)
             v.reasons.add("paid on chain with enough confirmations: " + v.paid.toPlainString() + " of " + (v.due == null ? "an unknown amount" : v.due.toPlainString()) + " due");
         return v;
+    }
+
+    private static String script(JSONObject reply) {
+        Object r = reply == null ? null : reply.opt("response");
+        if (r instanceof JSONArray) r = ((JSONArray) r).length() == 1 ? ((JSONArray) r).opt(0) : null;
+        if (!(r instanceof JSONObject)) return "";
+        JSONObject o = (JSONObject) r;
+        if (o.optJSONObject("token") != null) return o.optJSONObject("token").optString("script", o.optString("script", ""));
+        return o.optString("script", "");
     }
 
     /** The order ref a payment coin carries in state port 1 (hex of UTF-8), or "". */
