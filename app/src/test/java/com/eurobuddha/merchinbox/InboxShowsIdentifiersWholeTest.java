@@ -51,6 +51,39 @@ public class InboxShowsIdentifiersWholeTest {
         assertFalse(all, all.contains("…"));
     }
 
+    @Test public void automaticDeliveryNeverRunsEvenIfTheOldSettingSaysOn() throws Exception {
+        com.eurobuddha.comms.NodeApi node = org.mockito.Mockito.mock(com.eurobuddha.comms.NodeApi.class); set("node", node);
+        db.setMeta("autodeliver", "1");
+        MerchMessage m = new MerchMessage();
+        m.type = MerchMessage.ORDER; m.ref = "ORD-AUTO"; m.from = BUYER; m.to = "0xME"; m.amount = "0.000000001"; m.currency = "Minima";
+        m.buyerPayaddr = PAYADDR; m.items = "[{\"product\":\"x\",\"quantity\":1000,\"nftTokenId\":\"0x00\"}]";
+        db.upsertOrder(m, "seller", COIN);
+        assertEquals(MerchDb.PAID, db.recordPayment("ORD-AUTO", "0.000000001", "0x00"));
+        Method a = MainActivity.class.getDeclaredMethod("maybeAutoDeliver", String.class); a.setAccessible(true);
+        a.invoke(activity, "ORD-AUTO");
+        org.mockito.Mockito.verifyNoInteractions(node);
+    }
+
+    @Test public void aManualSendOfMinimaOrADecimalTokenNeverReachesSend() throws Exception {
+        com.eurobuddha.comms.NodeApi node = org.mockito.Mockito.mock(com.eurobuddha.comms.NodeApi.class); set("node", node);
+        List<String> commands = new ArrayList<>();
+        org.mockito.Mockito.doAnswer(i -> {
+            String c = i.getArgument(0); commands.add(c);
+            com.eurobuddha.comms.NodeApi.Cb cb = i.getArgument(1);
+            if (c.startsWith("tokens tokenid:")) cb.onResult(new org.json.JSONObject().put("status", true)
+                    .put("response", new org.json.JSONObject().put("tokenid", c.substring(15)).put("decimals", 8)));
+            return null;
+        }).when(node).cmd(org.mockito.ArgumentMatchers.anyString(), org.mockito.ArgumentMatchers.any());
+        MerchDb.Order o = new MerchDb.Order(); o.ref = "ORD-MAN"; o.payaddr = "0x" + "12".repeat(32); o.paid = true;
+        Method send = MainActivity.class.getDeclaredMethod("sendNft", MerchDb.Order.class, String[].class, boolean.class); send.setAccessible(true);
+        send.invoke(activity, o, new String[]{"x", "0x00", "1000", "0", "0"}, false);
+        send.invoke(activity, o, new String[]{"x", DeliveryGuard.MXUSD, "5", "0", "0"}, false);
+        assertTrue(commands.toString(), commands.isEmpty());
+        String decimalToken = "0x" + "EF".repeat(32);
+        send.invoke(activity, o, new String[]{"x", decimalToken, "1", "0", "0"}, false);
+        assertEquals(java.util.Collections.singletonList("tokens tokenid:" + decimalToken), commands);
+    }
+
     @Test public void anMxUsdOrderReadsMxUsdNeverTheWireValue() throws Exception {
         MerchMessage m = new MerchMessage();
         m.type = MerchMessage.ORDER; m.ref = "ORD-MXUSD"; m.from = BUYER; m.to = "0xME"; m.amount = "5"; m.currency = "USDT";

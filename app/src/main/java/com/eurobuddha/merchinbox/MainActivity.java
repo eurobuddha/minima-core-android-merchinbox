@@ -345,7 +345,12 @@ public class MainActivity extends AppCompatActivity {
 
     // ---- automatic NFT delivery ----
 
-    private boolean autoDeliverOn() { return "1".equals(db.getMeta("autodeliver", "1")); }
+    static final String AUTO_OFF_WHY = "⚡ Auto NFT delivery is off: an order's NFTs, quantities and total are the buyer's own figures and are not checked against your listing. Check each order, then use Send NFT.";
+
+    /** OFF, and not switchable, until the Inbox can check an order against the vendor's own listing (security
+     *  review 2026-11-20): an order's NFT lines, quantities and total are the buyer's own figures. The stored
+     *  "autodeliver" setting is kept but never acted on. */
+    private boolean autoDeliverOn() { return false; }
 
     /** Auto-send every unsent NFT line of a cleanly-paid order. Idempotent: nftsent: meta skips
      *  delivered lines, autoTried caps automatic attempts at one per line per session. */
@@ -402,19 +407,11 @@ public class MainActivity extends AppCompatActivity {
         }
         col.addView(s);
 
-        // Auto NFT delivery toggle — ON: paid NFT orders are sent to the buyer automatically.
-        final boolean auto = autoDeliverOn();
+        // Automatic NFT delivery is off and cannot be switched on (see autoDeliverOn).
         TextView ad = new TextView(this);
-        ad.setText("⚡ Auto NFT delivery  ·  " + (auto ? "ON" : "OFF"));
-        ad.setTextColor(auto ? Design.IN : Design.DIM);
+        ad.setText(AUTO_OFF_WHY);
+        ad.setTextColor(Design.DIM);
         ad.setTextSize(12.5f); ad.setPadding(dp(16), 0, dp(16), dp(8));
-        ad.setOnClickListener(v -> {
-            final String next = auto ? "0" : "1";
-            io.execute(() -> {
-                db.setMeta("autodeliver", next);
-                ui.post(() -> { toast("Auto NFT delivery " + ("1".equals(next) ? "on" : "off")); refreshTop(buildOrders()); });
-            });
-        });
         col.addView(ad);
 
         col.addView(filterBar());
@@ -702,7 +699,9 @@ public class MainActivity extends AppCompatActivity {
             if (nftSending.contains(key)) return;
             new AlertDialog.Builder(this)
                     .setTitle("Send NFT")
-                    .setMessage("Send " + label + " (" + tokenid + ") to " + o.payaddr + "?\n\nThis transfers the NFT on-chain.")
+                    .setMessage("Send " + label + "?\n\nToken id\n" + tokenid + "\n\nQuantity\n"
+                            + (bundle ? "every piece you hold" : piece ? "1 (edition #" + line[3] + ")" : qty)
+                            + "\n\nTo\n" + o.payaddr + "\n\nThis transfers the NFT on-chain.")
                     .setPositiveButton("Send", (d, w) -> sendNft(o, line, false))
                     .setNegativeButton("Cancel", null)
                     .show();
@@ -726,9 +725,40 @@ public class MainActivity extends AppCompatActivity {
         // The pay address is buyer-supplied chain data interpolated into a node command — validate hard.
         if (!Util.isValidAddress(o.payaddr)) { deliverFailed(o, key, "buyer pay address is malformed", auto); return; }
         if (!Util.isValidHexId(tokenid)) { deliverFailed(o, key, "token id is malformed", auto); return; }
-        if ("1".equals(line[4])) { collectionDeliver(o, line, auto); return; }
-        if (!"0".equals(line[3])) { stateNftDeliver(o, line, auto); return; }
+        guardDelivery(o, line, key, auto, () -> {
+            if ("1".equals(line[4])) { collectionDeliver(o, line, auto); return; }
+            if (!"0".equals(line[3])) { stateNftDeliver(o, line, auto); return; }
+            plainDeliver(o, line, key, auto);
+        });
+    }
 
+    /** Every delivery passes DeliveryGuard first: never Minima or MxUSD, only a token the node confirms has
+     *  0 decimals, never more than the vendor holds (that last check is skipped once this line's transfer was
+     *  posted, when the coins are expected to be gone). Any doubt refuses; nothing is sent. */
+    private void guardDelivery(final MerchDb.Order o, final String[] line, final String key, final boolean auto, final Runnable go) {
+        final String tokenid = line[1];
+        final String qty = "0".equals(line[3]) && "0".equals(line[4]) ? line[2] : "1";
+        String bad = DeliveryGuard.basic(tokenid);
+        if (bad != null) { deliverFailed(o, key, bad, auto); return; }
+        node.cmd("tokens tokenid:" + tokenid, new NodeApi.Cb() {
+            @Override public void onResult(JSONObject t) {
+                String why = DeliveryGuard.token(tokenid, t);
+                if (why != null) { deliverFailed(o, key, why, auto); return; }
+                if (!db.getMeta("nftposted:" + key, "").isEmpty()) { go.run(); return; }
+                node.cmd("coins relevant:true tokenid:" + tokenid, new NodeApi.Cb() {
+                    @Override public void onResult(JSONObject c) {
+                        String w = DeliveryGuard.held(tokenid, qty, c);
+                        if (w != null) deliverFailed(o, key, w, auto); else go.run();
+                    }
+                    @Override public void onError(String m) { deliverFailed(o, key, "your holdings could not be read; nothing was sent", auto); }
+                });
+            }
+            @Override public void onError(String m) { deliverFailed(o, key, "the node did not confirm the token; nothing was sent", auto); }
+        });
+    }
+
+    private void plainDeliver(final MerchDb.Order o, final String[] line, final String key, final boolean auto) {
+        final String tokenid = line[1], qty = line[2];
         if (!nftSending.add(key)) return;
         refreshOrderIfTopmost(o.ref);
         CommsTransport.sendPayment(node, o.payaddr, qty, tokenid, o.ref, new CommsTransport.SendCb() {
@@ -784,7 +814,7 @@ public class MainActivity extends AppCompatActivity {
     private void deliverFailed(MerchDb.Order o, String key, String msg, boolean auto) {
         nftSending.remove(key);
         if (auto) notifyDelivery(o.ref, false, msg);
-        else toast("NFT send failed: " + msg);
+        else new AlertDialog.Builder(this).setTitle("NFT not sent").setMessage(msg).setPositiveButton("OK", null).show();   // whole ids: a dialog, not a toast
         refreshOrderIfTopmost(o.ref);
     }
 
