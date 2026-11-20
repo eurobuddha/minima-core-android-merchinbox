@@ -44,6 +44,7 @@ final class DeliveryRules {
     static final class Inputs {
         MerchDb.Order order;          // a fresh read
         boolean mismatch;
+        boolean deliverable;          // MerchDb.deliverable: recorded paid in full against the listing's due
         JSONObject listing;           // compact (Listing.compact), or null
         String[] line;                // {name, tokenid, quantity, stateIdx, bundle}
         String lineState = "";        // DeliveryLedger state of this line
@@ -75,6 +76,8 @@ final class DeliveryRules {
         // 6. recipient
         if (!Util.isValidAddress(o.payaddr)) v.reasons.add("the order's buyer address is not a valid Minima address: " + Listing.cap(o.payaddr, 120));
         if (in.mismatch) v.reasons.add("the order names a token that is not its currency's");
+        if (!MerchMessage.validRef(o.ref)) v.reasons.add("the order's reference is not one the Shop makes: " + Listing.cap(o.ref, 70));
+        if (!in.deliverable) v.reasons.add("the order is not recorded as paid in full against your listing");
 
         // 1 + 2. listing, and only what is listed
         if (in.listing == null) {
@@ -118,7 +121,8 @@ final class DeliveryRules {
         else if (want != null) for (int i = 0; i < coins.length(); i++) {
             JSONObject c = coins.optJSONObject(i);
             if (c == null || !want.equalsIgnoreCase(c.optString("tokenid", "")) || c.optBoolean("spent", false)) continue;
-            if (!o.ref.equals(text(CommsScanner.statePort(c, 1)))) continue;
+            String h = CommsScanner.statePort(c, 1);   // no port 1, or not hex UTF-8, is never a payment (C1)
+            if (o.ref.isEmpty() || h == null || !o.ref.equals(text(h))) continue;
             String id = c.optString("coinid", "").toLowerCase(java.util.Locale.ROOT);
             String owner = in.counted.get(id);
             if (owner != null && !owner.isEmpty() && !owner.equals(o.ref)) { v.reasons.add("coin " + id + " was counted for order " + owner); continue; }
@@ -140,6 +144,9 @@ final class DeliveryRules {
         if (h.length() % 2 != 0 || !h.matches("[0-9a-fA-F]*")) return "";
         byte[] b = new byte[h.length() / 2];
         for (int i = 0; i < b.length; i++) b[i] = (byte) Integer.parseInt(h.substring(2 * i, 2 * i + 2), 16);
-        return new String(b, StandardCharsets.UTF_8);
+        try {
+            return StandardCharsets.UTF_8.newDecoder().onMalformedInput(java.nio.charset.CodingErrorAction.REPORT)
+                    .onUnmappableCharacter(java.nio.charset.CodingErrorAction.REPORT).decode(java.nio.ByteBuffer.wrap(b)).toString();
+        } catch (java.nio.charset.CharacterCodingException e) { return ""; }
     }
 }

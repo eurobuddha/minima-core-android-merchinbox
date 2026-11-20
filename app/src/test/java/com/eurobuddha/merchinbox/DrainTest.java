@@ -98,6 +98,7 @@ public class DrainTest {
         if (token != null) it.put("nftTokenId", token);
         m.items = new JSONArray().put(it).toString();
         db.upsertOrder(m, "seller", "0xC0");
+        call("recheck", new Class<?>[]{MerchDb.Order.class}, db.order(ref));   // as routeIncoming does: the due from the listing
         return db.order(ref);
     }
     void pay(String ref, String amount, long created, String coinid) throws Exception {

@@ -302,6 +302,7 @@ public class MainActivity extends AppCompatActivity {
         MerchMessage m = MerchMessage.fromWire(opened.plaintext);
         if (m == null || !opened.fromPublicId.equals(m.from)) return false;   // sig must match claimed sender
         if (!myId.equals(m.to)) return false;                                  // addressed to me
+        if (!MerchMessage.validRef(m.ref)) return false;                       // an empty or odd ref is never stored (C1)
         if (MerchMessage.ORDER.equals(m.type)) {
             boolean fresh = db.upsertOrder(m, "seller", coinid);
             if (fresh) recheck(db.order(m.ref));   // what is due, from the vendor's own listing
@@ -855,6 +856,7 @@ public class MainActivity extends AppCompatActivity {
             DeliveryRules.Inputs in = new DeliveryRules.Inputs();
             in.order = db.order(ref);
             in.mismatch = db.mismatch(in.order);
+            in.deliverable = db.deliverable(in.order);
             in.listing = in.order == null ? null : listingFor(in.order.shopId);
             in.line = line;
             String key = lineKey(ref, line);

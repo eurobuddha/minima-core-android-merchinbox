@@ -102,6 +102,10 @@ public class MerchMessage {
         }
     }
 
+    /** An order reference as the Shop makes it ("ORD-" or "INQ-" and hex), or any 4 to 64 letters, digits and
+     *  dashes; anything else (an empty ref above all) is never accepted (security review C1). */
+    public static boolean validRef(String ref) { return ref != null && ref.matches("[A-Za-z0-9-]{4,64}"); }
+
     public static MerchMessage fromWire(byte[] wire) {
         try {
             JSONObject o = new JSONObject(new String(wire, StandardCharsets.UTF_8));
