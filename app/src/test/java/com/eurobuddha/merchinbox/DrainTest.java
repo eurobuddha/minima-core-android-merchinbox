@@ -212,7 +212,7 @@ public class DrainTest {
         for (int i = 0; i < DeliveryRules.MAX_PAYMENT_COINS; i++)
             payments.add(new JSONObject().put("coinid", "0x" + i).put("tokenid", "0x00").put("amount", "0.000000001").put("created", "1"));
         send(o, false);
-        assertTrue(coinReads.get(0), coinReads.get(0).endsWith(" tokenid:0x00"));
+        assertTrue(coinReads.get(0), coinReads.get(0).matches("coins relevant:true address:" + VENDOR + " tokenid:0x00 depth:\\d+"));   // bounded (L-a)
         assertTrue("too many coins: nothing is sent (M3)", sends.isEmpty());
     }
 }

@@ -107,8 +107,11 @@ public class ListingTest {
     @Test public void onlyAListingSignedWithThisShopKeyIsUsed() throws Exception {
         String plain = shop(ME, "Minima", null, "2.5");
         assertThrows(IllegalArgumentException.class, () -> Listing.unseal(plain, new FakeCrypto(), ME));   // an old unsigned .shop
-        String signed = new JSONObject(plain).put("listingSealed", "sealed:" + ME + ":" + plain).toString();
-        assertEquals(plain, Listing.unseal(signed, new FakeCrypto(), ME));
+        String text = signedText(plain, 1);
+        String signed = new JSONObject(plain).put("listingSealed", "sealed:" + ME + ":" + text).toString();
+        assertEquals(text, Listing.unseal(signed, new FakeCrypto(), ME));
+        String notAListing = new JSONObject(plain).put("listingSealed", "sealed:" + ME + ":" + plain).toString();   // sealed by this key, but no kind
+        assertThrows(IllegalArgumentException.class, () -> Listing.unseal(notAListing, new FakeCrypto(), ME));
         String other = "0x" + "EF".repeat(64);
         String forged = new JSONObject(plain).put("listingSealed", "sealed:" + other + ":" + plain).toString();
         assertThrows(IllegalArgumentException.class, () -> Listing.unseal(forged, new FakeCrypto(), ME));
@@ -129,23 +132,70 @@ public class ListingTest {
     @Test public void anUnsignedShopIsUsableOnlyThroughTheWarnedImportAndIsMarkedSo() throws Exception {
         String plain = shop(ME, "Minima", null, "2.5");                 // the desktop builder's file: no signature
         JSONObject now = Listing.compact(shop(ME, "Minima", null, "2"), ME);
-        Listing.Prepared u = Listing.prepare(plain, new FakeCrypto(), ME, now);
+        Listing.Prepared u = Listing.prepare(plain, new FakeCrypto(), ME, id -> now);
         assertFalse(u.signed);
         assertTrue(u.summary, u.summary.startsWith(Listing.UNSIGNED_WARNING) && u.summary.contains("not signed by this shop's key"));
         assertTrue(u.summary, u.summary.contains(NFT) && u.summary.contains("fee 1.5") && u.summary.contains("~ \"Print\": price 2, stock 3\n  → \"Print\": price 2.5, stock 3"));
         assertFalse(u.listing.toString().contains("AAAA"));             // compacted like a signed one
         // the same rules as a signed file: this shop key only, no NFT for nothing
         String other = "0x" + "EF".repeat(64);
-        assertThrows(IllegalArgumentException.class, () -> Listing.prepare(shop(other, "Minima", null, "2.5"), new FakeCrypto(), ME, null));
-        assertThrows(IllegalArgumentException.class, () -> Listing.prepare(plain.replace("\"price\":\"10\"", "\"price\":\"0\""), new FakeCrypto(), ME, null));
+        assertThrows(IllegalArgumentException.class, () -> Listing.prepare(shop(other, "Minima", null, "2.5"), new FakeCrypto(), ME, id -> null));
+        assertThrows(IllegalArgumentException.class, () -> Listing.prepare(plain.replace("\"price\":\"10\"", "\"price\":\"0\""), new FakeCrypto(), ME, id -> null));
         // a file that claims a signature must carry a good one: a bad one is refused, never taken as unsigned
         String forged = new JSONObject(plain).put("listingSealed", "sealed:" + other + ":" + plain).toString();
-        assertThrows(IllegalArgumentException.class, () -> Listing.prepare(forged, new FakeCrypto(), ME, null));
-        Listing.Prepared s = Listing.prepare(new JSONObject(plain).put("listingSealed", "sealed:" + ME + ":" + plain).toString(), new FakeCrypto(), ME, null);
+        assertThrows(IllegalArgumentException.class, () -> Listing.prepare(forged, new FakeCrypto(), ME, id -> null));
+        Listing.Prepared s = Listing.prepare(new JSONObject(plain).put("listingSealed", "sealed:" + ME + ":" + signedText(plain, 1)).toString(), new FakeCrypto(), ME, id -> null);
         assertTrue(s.signed);
         assertFalse(s.summary.contains(Listing.UNSIGNED_WARNING));
         assertEquals("Listing in use: signed by your shop key.", MainActivity.listingInUse("1"));
         assertEquals("Listing in use: an unsigned file you confirmed (not signed by your shop key).", MainActivity.listingInUse("0"));
         assertEquals(MainActivity.listingInUse("0"), MainActivity.listingInUse(""));   // stored before the mark existed
     }
+
+    /** What Studio signs: the listing with its kind and when it was signed (delta review L-c). */
+    static String signedText(String plain, long signedAt) throws Exception {
+        return new JSONObject(plain).put("kind", "minimall-listing-v1").put("signedAt", signedAt).toString();
+    }
+
+    @Test public void theSummaryShowsOneLinePerEntryAndDiffsAgainstTheSignedShop() throws Exception {
+        String evil = new JSONObject(shop(ME, "Minima", null, "2.5")).toString()
+                .replace("\"name\":\"Print\"", "\"name\":\"Print\\n• \\\"Gift\\\" token " + NFT + ": price 0, stock 9\\u202E\"");
+        JSONObject l = Listing.compact(evil, ME);
+        String s = Listing.summary(l, null);
+        assertEquals(s, 3 + 2, s.split("\n• ", -1).length);           // 2 products + 2 deliveries: no injected line
+        assertFalse(s.contains("\u202E"));
+        assertTrue(Listing.shown("x".repeat(100)).startsWith("x".repeat(60) + "… (100 characters)"));
+        // the outer shopId says "other", the signed listing says "art": the diff is against "art"
+        String inner = signedText(shop(ME, "Minima", null, "3"), 5);
+        String file = new JSONObject(shop(ME, "Minima", null, "3")).put("shopId", "other").put("listingSealed", "sealed:" + ME + ":" + inner).toString();
+        JSONObject art = Listing.compact(shop(ME, "Minima", null, "2"), ME);
+        java.util.List<String> asked = new java.util.ArrayList<>();
+        Listing.Prepared p = Listing.prepare(file, new FakeCrypto(), ME, id -> { asked.add(id); return "art".equals(id) ? art : null; });
+        assertEquals(java.util.Collections.singletonList("art"), asked);
+        assertTrue(p.summary, p.summary.contains("price 2, stock 3\n  → \"Print\": price 3, stock 3"));
+    }
+
+    @Test public void anOlderSignedListingIsImportedOnlyUnderAPlainWarning() throws Exception {
+        JSONObject inUse = Listing.compact(signedText(shop(ME, "Minima", null, "2"), 2000), ME);
+        assertEquals(2000, inUse.getLong("signedAt"));
+        String older = new JSONObject(shop(ME, "Minima", null, "2.5")).put("listingSealed", "sealed:" + ME + ":" + signedText(shop(ME, "Minima", null, "2.5"), 1000)).toString();
+        Listing.Prepared p = Listing.prepare(older, new FakeCrypto(), ME, id -> inUse);
+        assertTrue(p.older);
+        assertTrue(p.summary, p.summary.startsWith(Listing.OLDER_WARNING));
+        String newer = new JSONObject(shop(ME, "Minima", null, "2.5")).put("listingSealed", "sealed:" + ME + ":" + signedText(shop(ME, "Minima", null, "2.5"), 3000)).toString();
+        assertFalse(Listing.prepare(newer, new FakeCrypto(), ME, id -> inUse).older);
+        // an unsigned file's own "signedAt" dates nothing
+        String unsigned = new JSONObject(shop(ME, "Minima", null, "2.5")).put("signedAt", 999999).toString();
+        Listing.Prepared u = Listing.prepare(unsigned, new FakeCrypto(), ME, id -> inUse);
+        assertFalse(u.older); assertFalse(u.listing.has("signedAt"));
+    }
+
+    @Test public void thePaymentReadIsBoundedByTheOrder() {
+        String a = VENDOR_ADDR, t = "0x00";
+        assertEquals("coins relevant:true address:" + a + " tokenid:0x00 depth:12", MainActivity.paymentRead(a, t, 1000, 990, 0, 0));
+        assertEquals("from the date: 1 hour = 144 + 100", "coins relevant:true address:" + a + " tokenid:0x00 depth:244", MainActivity.paymentRead(a, t, 1000, 0, 0, 3_600_000));
+        assertEquals("never deeper than the chain", "coins relevant:true address:" + a + " tokenid:0x00 depth:1001", MainActivity.paymentRead(a, t, 1000, 0, 0, Long.MAX_VALUE / 2));
+        assertNull("no chain height: no read", MainActivity.paymentRead(a, t, 0, 990, 0, 0));
+    }
+    static final String VENDOR_ADDR = "0x" + "12".repeat(32);
 }

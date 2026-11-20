@@ -40,8 +40,15 @@ final class Listing {
         try { opened = crypto == null ? null : crypto.open(blob); } catch (Throwable e) { opened = null; }
         if (opened == null || !opened.valid || myId == null || !myId.equalsIgnoreCase(opened.fromPublicId))
             throw new IllegalArgumentException("This .shop file's listing is not signed by your shop key. Export it again from miniMall Studio and import that file.");
-        return new String(opened.plaintext, java.nio.charset.StandardCharsets.UTF_8);
+        String text = new String(opened.plaintext, java.nio.charset.StandardCharsets.UTF_8);
+        // only a text Studio signed AS a listing (delta review L-c): never any other text sealed with this key
+        String kind;
+        try { kind = new JSONObject(text).optString("kind", ""); } catch (Exception e) { kind = ""; }
+        if (!KIND.equals(kind)) throw new IllegalArgumentException("This .shop file's signed text is not a miniMall listing. Export it again from miniMall Studio and import that file.");
+        return text;
     }
+
+    static final String KIND = "minimall-listing-v1";
 
     /** Said above the summary of a .shop that carries no signature (a shop built with the miniMall-core desktop
      *  builder, which holds only the public Vendor Card, or with Studio before 0.3.21). */
@@ -51,24 +58,40 @@ final class Listing {
      *  A signed file must carry a valid signature by this shop key (a bad one is refused, never treated as
      *  unsigned); an unsigned one is allowed only through this explicit import, with the warning first. The vendor
      *  key in the file must be this shop key and NFTs priced at 0 are refused either way (compact). */
+    static final String OLDER_WARNING = "⚠ This listing was signed BEFORE the one in use: it is an older listing. Use it only if you mean to go back to it.";
+
     static final class Prepared {
-        final JSONObject listing; final boolean signed; final String summary;
-        Prepared(JSONObject listing, boolean signed, String summary) { this.listing = listing; this.signed = signed; this.summary = summary; }
+        final JSONObject listing; final boolean signed, older; final String summary;
+        Prepared(JSONObject listing, boolean signed, boolean older, String summary) { this.listing = listing; this.signed = signed; this.older = older; this.summary = summary; }
     }
 
-    static Prepared prepare(String shopJson, com.eurobuddha.comms.CryptoProvider crypto, String myId, JSONObject current) {
+    /** {@code currentFor} gives the listing in use for a shop id: the diff is against the listing of the shop id the
+     *  file's own (signed) listing names, never the unsigned outer one (delta review L-b). */
+    static Prepared prepare(String shopJson, com.eurobuddha.comms.CryptoProvider crypto, String myId, java.util.function.Function<String, JSONObject> currentFor) {
         boolean signed;
         try { signed = !new JSONObject(shopJson).optString("listingSealed", "").isEmpty(); }
         catch (Exception e) { throw new IllegalArgumentException("That is not a .shop file."); }
         JSONObject listing = compact(signed ? unseal(shopJson, crypto, myId) : shopJson, myId);
+        if (!signed) listing.remove("signedAt");   // only a signature dates a listing
+        JSONObject current = currentFor.apply(listing.optString("shopId"));
+        long at = listing.optLong("signedAt", 0), now = current == null ? 0 : current.optLong("signedAt", 0);
+        boolean older = at > 0 && now > 0 && at < now;
         String s = summary(listing, current);
-        return new Prepared(listing, signed, signed ? s : UNSIGNED_WARNING + "\n\n" + s);
+        if (!signed) s = UNSIGNED_WARNING + "\n\n" + s;
+        if (older) s = OLDER_WARNING + "\n\n" + s;
+        return new Prepared(listing, signed, older, s);
+    }
+
+    /** A name or id from a .shop as the summary shows it: no control characters, line breaks or direction overrides
+     *  (so one entry cannot pose as several), and at most 60 characters (delta review L-b). */
+    static String shown(String s) {
+        return cap(s == null ? "" : s.replaceAll("[\\p{Cc}\\p{Zl}\\p{Zp}\\u200E\\u200F\\u202A-\\u202E\\u2066-\\u2069]", " "), 60);
     }
 
     /** Every product of a compact listing (name, token id whole, price, stock) and its delivery fees, and how it
      *  differs from the current one (null = none), for the vendor to read before "Use this listing". */
     static String summary(JSONObject next, JSONObject current) {
-        StringBuilder sb = new StringBuilder("Shop \"" + next.optString("shopName", next.optString("shopId")) + "\" (" + next.optString("shopId") + "), paid in " + MerchMessage.label(next.optString("currency")) + "\n");
+        StringBuilder sb = new StringBuilder("Shop \"" + shown(next.optString("shopName", next.optString("shopId"))) + "\" (" + shown(next.optString("shopId")) + "), paid in " + MerchMessage.label(next.optString("currency")) + "\n");
         java.util.Map<String, String> now = lines(next), before = current == null ? new java.util.LinkedHashMap<>() : lines(current);
         for (String l : now.values()) sb.append("\n• ").append(l);
         if (current != null) {
@@ -90,13 +113,13 @@ final class Listing {
         for (int i = 0; p != null && i < p.length(); i++) {
             JSONObject x = p.optJSONObject(i); if (x == null) continue;
             String t = x.optString("nftTokenId"), key = x.optString("name") + "|" + t + "|" + x.optInt("nftStateIdx") + "|" + x.optInt("nftBundle");
-            m.put(key, "\"" + x.optString("name") + "\"" + (t.isEmpty() ? "" : " token " + t + (x.optInt("nftStateIdx") > 0 ? " #" + x.optInt("nftStateIdx") : "") + (x.optInt("nftBundle") > 0 ? " (complete collection)" : ""))
+            m.put(key, "\"" + shown(x.optString("name")) + "\"" + (t.isEmpty() ? "" : " token " + t + (x.optInt("nftStateIdx") > 0 ? " #" + x.optInt("nftStateIdx") : "") + (x.optInt("nftBundle") > 0 ? " (complete collection)" : ""))
                     + ": price " + x.optString("price") + ", stock " + (x.optInt("nftStateIdx") > 0 || x.optInt("nftBundle") > 0 ? 1 : x.optInt("maxUnits", 10)));
         }
         JSONArray s = l.optJSONArray("shipping");
         for (int i = 0; s != null && i < s.length(); i++) {
             JSONObject x = s.optJSONObject(i); if (x == null) continue;
-            m.put("ship|" + x.optString("id"), "delivery \"" + x.optString("id") + "\": fee " + x.optString("fee"));
+            m.put("ship|" + x.optString("id"), "delivery \"" + shown(x.optString("id")) + "\": fee " + x.optString("fee"));
         }
         return m;
     }
@@ -134,6 +157,7 @@ final class Listing {
                 shipping.put(new JSONObject().put("id", s.optString("id", "")).put("fee", fee));
             }
             out.put("products", products).put("shipping", shipping);
+            if (o.optLong("signedAt", 0) > 0) out.put("signedAt", o.optLong("signedAt"));
         } catch (org.json.JSONException e) { throw new IllegalArgumentException("That is not a .shop file."); }
         return out;
     }

@@ -305,6 +305,7 @@ public class MainActivity extends AppCompatActivity {
         if (!MerchMessage.validRef(m.ref)) return false;                       // an empty or odd ref is never stored (C1)
         if (MerchMessage.ORDER.equals(m.type)) {
             boolean fresh = db.upsertOrder(m, "seller", coinid);
+            if (fresh && coin != null && coin.optLong("created", 0) > 0) db.setMeta("orderblock:" + m.ref, String.valueOf(coin.optLong("created")));   // bounds the payment read (L-a)
             if (fresh) recheck(db.order(m.ref));   // what is due, from the vendor's own listing
             return fresh;
         }
@@ -373,8 +374,7 @@ public class MainActivity extends AppCompatActivity {
                 // Shown in full first, every time; a signed listing must be this shop key's, an unsigned one (desktop
                 // builder, older Studio) is allowed only here, with the warning, and only on "Use this listing".
                 String raw = new String(bos.toByteArray(), java.nio.charset.StandardCharsets.UTF_8);
-                String shopId0 = new JSONObject(raw).optString("shopId", "");
-                final Listing.Prepared p = Listing.prepare(raw, crypto, me, listingFor(shopId0));
+                final Listing.Prepared p = Listing.prepare(raw, crypto, me, this::listingFor);
                 ui.post(() -> new AlertDialog.Builder(this).setTitle(p.signed ? "Use this listing?" : "Use this UNSIGNED listing?").setMessage(p.summary)
                         .setPositiveButton("Use this listing", (d, w) -> useListing(p.listing, p.signed))
                         .setNegativeButton("Cancel", null).show());
@@ -919,6 +919,23 @@ public class MainActivity extends AppCompatActivity {
         });
     }
 
+    static long tipOf(JSONObject b) {
+        try { return Long.parseLong(b == null || b.optJSONObject("response") == null ? "" : b.optJSONObject("response").optString("block", "")); }
+        catch (NumberFormatException e) { return 0; }
+    }
+
+    /** The read of an order's payment coins (delta review L-a): the currency's token at the vendor address, and only
+     *  as deep as the order: from the block its order coin was created at, else from its date at 2 x the 50 s block
+     *  time plus 100 blocks (a payment never predates its order). Unspent coins older than the node's tree sit in
+     *  its root node, at the far end of that depth, so they are still in the reply. With no chain height there is
+     *  no read at all (null): the delivery is refused for want of it. */
+    static String paymentRead(String vendorAddr, String payToken, long tip, long orderBlock, long orderDate, long now) {
+        if (tip <= 0) return null;
+        String cmd = "coins relevant:true address:" + vendorAddr + " tokenid:" + payToken;
+        long depth = orderBlock > 0 && orderBlock <= tip ? tip - orderBlock + 2 : Math.max(0, now - orderDate) / 25_000L + 100;
+        return cmd + " depth:" + Math.max(1, Math.min(depth, tip + 1));
+    }
+
     /** Every rule of DeliveryRules, from fresh reads: the chain tip, the token, the vendor's holdings, the
      *  payment coins at the vendor's own address, and (on the io thread) the order, its listing and the ledger. */
     private void checkDelivery(final String ref, final String[] line, final java.util.function.Consumer<DeliveryRules.Verdict> then) {
@@ -926,8 +943,10 @@ public class MainActivity extends AppCompatActivity {
         final boolean askToken = DeliveryGuard.basic(tokenid) == null;
         MerchDb.Order pre = db.order(ref);
         final String payToken = pre == null ? null : MerchMessage.tokenFor(pre.currency);   // only the currency's coins are read (M3)
+        long ob; try { ob = Long.parseLong(db.getMeta("orderblock:" + ref, "0")); } catch (NumberFormatException e) { ob = 0; }
+        final long orderBlock = ob, orderDate = pre == null ? 0 : pre.date;
         ask("block", b -> ask(askToken ? "tokens tokenid:" + tokenid : null, t -> ask(askToken ? "coins relevant:true tokenid:" + tokenid : null, h ->
-                ask(Util.isValidAddress(vendorAddr) && payToken != null ? "coins relevant:true address:" + vendorAddr + " tokenid:" + payToken : null, pay -> io.execute(() -> {
+                ask(Util.isValidAddress(vendorAddr) && payToken != null ? paymentRead(vendorAddr, payToken, tipOf(b), orderBlock, orderDate, System.currentTimeMillis()) : null, pay -> io.execute(() -> {
             DeliveryRules.Inputs in = new DeliveryRules.Inputs();
             in.order = db.order(ref);
             in.mismatch = db.mismatch(in.order);
@@ -941,7 +960,7 @@ public class MainActivity extends AppCompatActivity {
             in.lineState = !db.getMeta("nftsent:" + key, "").isEmpty() ? DeliveryLedger.SENT : DeliveryLedger.state(w, ledgerKey(ref, line));
             in.resuming = !db.getMeta("nftposted:" + key, "").isEmpty();
             in.tokenReply = t; in.holdingsReply = h; in.paymentReply = pay;
-            try { in.tip = Long.parseLong(b == null || b.optJSONObject("response") == null ? "" : b.optJSONObject("response").optString("block", "")); } catch (NumberFormatException e) { in.tip = 0; }
+            in.tip = tipOf(b);
             in.minConf = minConf();
             JSONArray coins = pay == null ? null : pay.optJSONArray("response");
             for (int i = 0; coins != null && i < coins.length(); i++) {
