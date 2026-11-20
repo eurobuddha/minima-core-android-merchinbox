@@ -64,6 +64,22 @@ final class Listing {
         return out;
     }
 
+    /** A buyer's items JSON, or null: refused unread when over 64 KB or nested deeper than 8 (scanned as text
+     *  first, so nothing huge or deep is ever parsed), and any parsing failure at all is null (review M2). */
+    static JSONArray items(String raw) {
+        if (raw == null || raw.isEmpty()) return new JSONArray();
+        if (raw.length() > 64 * 1024) return null;
+        int depth = 0; boolean inString = false, escaped = false;
+        for (int i = 0; i < raw.length(); i++) {
+            char ch = raw.charAt(i);
+            if (inString) { if (escaped) escaped = false; else if (ch == '\\') escaped = true; else if (ch == '"') inString = false; continue; }
+            if (ch == '"') inString = true;
+            else if (ch == '[' || ch == '{') { if (++depth > 8) return null; }
+            else if (ch == ']' || ch == '}') depth--;
+        }
+        try { return new JSONArray(raw); } catch (Throwable e) { return null; }
+    }
+
     /** A buyer's number, or null unless it is a plain decimal (no exponent) with at most {@code whole} digits
      *  before the point and {@code decimals} after it; checked on the text first, so "1E+999999999" never
      *  becomes a huge number or a huge string (security review, M1). */
@@ -103,7 +119,7 @@ final class Listing {
         if (want == null || !want.equals(MerchMessage.tokenFor(o.currency)))
             problems.add("the order's currency (" + MerchMessage.label(o.currency) + ") is not your shop's (" + MerchMessage.label(listing.optString("currency")) + ")");
         JSONArray items;
-        try { items = new JSONArray(o.items == null || o.items.isEmpty() ? "[]" : o.items); } catch (Exception e) { items = null; }
+        items = items(o.items);
         if (items == null || items.length() == 0) problems.add("the order has no items you can read");
         JSONArray products = listing.optJSONArray("products");
         java.util.Map<JSONObject, BigDecimal> perProduct = new java.util.IdentityHashMap<>();   // all lines of one product together (L6)

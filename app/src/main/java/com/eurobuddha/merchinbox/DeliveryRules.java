@@ -38,6 +38,9 @@ final class DeliveryRules {
     /** The default minimum confirmations of a payment coin; the vendor may raise it, never below 1. */
     static final int DEFAULT_MIN_CONF = 3;
 
+    /** The most payment coins one check reads (the node hands a large reply over as a file, never inline). */
+    static final int MAX_PAYMENT_COINS = 2000;
+
     private DeliveryRules() {}
 
     /** Everything read for one check. Replies are the node's JSON (null = no answer). */
@@ -120,7 +123,8 @@ final class DeliveryRules {
         String want = MerchMessage.tokenFor(o.currency);
         JSONArray coins = in.paymentReply == null || !in.paymentReply.optBoolean("status", false) ? null : in.paymentReply.optJSONArray("response");
         if (in.tip <= 0) v.reasons.add("the chain height could not be read");
-        if (coins == null) v.reasons.add("your payment coins could not be read");
+        if (coins != null && coins.length() > MAX_PAYMENT_COINS) { v.reasons.add("more than " + MAX_PAYMENT_COINS + " coins of this token are at your address: consolidate them before sending (M3)"); coins = null; }
+        else if (coins == null) v.reasons.add("your payment coins could not be read");
         else if (want != null) for (int i = 0; i < coins.length(); i++) {
             JSONObject c = coins.optJSONObject(i);
             if (c == null || !want.equalsIgnoreCase(c.optString("tokenid", "")) || c.optBoolean("spent", false)) continue;

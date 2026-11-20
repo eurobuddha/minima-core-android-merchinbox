@@ -81,4 +81,15 @@ public class ListingTest {
         c = Listing.check(l, order("Minima", "x".repeat(100000), item("P".repeat(100000), 1, "2.5", null)));
         for (String p : c.problems) assertTrue(p.length() + " characters", p.length() < 400);
     }
+
+    @Test(timeout = 5000) public void hugeOrDeepItemsAreRefusedUnread() throws Exception {
+        assertNull(Listing.items("[" + "{\"product\":\"x\"},".repeat(7000) + "{}]"));   // over 64 KB
+        assertNull(Listing.items("[[[[[[[[[1]]]]]]]]]"));                              // nested 9 deep
+        assertNotNull(Listing.items("[[[[[[[[1]]]]]]]]"));                              // 8 is allowed
+        assertNotNull(Listing.items("[{\"product\":\"a [[[[[[[[[ b\"}]"));              // brackets inside a string do not count
+        assertNull(Listing.items("[1,"));
+        JSONObject l = Listing.compact(shop(ME, "Minima", null, "2.5"), ME);
+        MerchDb.Order o = order("Minima", "digital"); o.items = "[" + "[".repeat(5000) + "]".repeat(5000) + "]";
+        assertFalse(Listing.check(l, o).problems.isEmpty());
+    }
 }

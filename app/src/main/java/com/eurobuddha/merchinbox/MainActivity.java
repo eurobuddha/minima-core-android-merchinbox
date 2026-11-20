@@ -739,7 +739,8 @@ public class MainActivity extends AppCompatActivity {
         List<String[]> out = new ArrayList<>();
         if (o == null || o.items == null || o.items.isEmpty()) return out;
         try {
-            JSONArray a = new JSONArray(o.items);
+            JSONArray a = Listing.items(o.items);   // refused unread when too large or too deep (M2)
+            if (a == null) return out;
             for (int i = 0; i < a.length(); i++) {
                 JSONObject it = a.optJSONObject(i); if (it == null) continue;
                 String tokenid = it.optString("nftTokenId", "");
@@ -749,7 +750,7 @@ public class MainActivity extends AppCompatActivity {
                 int bundle = it.optInt("nftBundle", 0) > 0 ? 1 : 0;
                 out.add(new String[]{it.optString("product", "NFT"), tokenid, String.valueOf(q), String.valueOf(idx), String.valueOf(bundle), String.valueOf(i)});
             }
-        } catch (Exception ignored) {}
+        } catch (Throwable ignored) {}
         return out;
     }
 
@@ -855,8 +856,10 @@ public class MainActivity extends AppCompatActivity {
     private void checkDelivery(final String ref, final String[] line, final java.util.function.Consumer<DeliveryRules.Verdict> then) {
         final String tokenid = line[1];
         final boolean askToken = DeliveryGuard.basic(tokenid) == null;
+        MerchDb.Order pre = db.order(ref);
+        final String payToken = pre == null ? null : MerchMessage.tokenFor(pre.currency);   // only the currency's coins are read (M3)
         ask("block", b -> ask(askToken ? "tokens tokenid:" + tokenid : null, t -> ask(askToken ? "coins relevant:true tokenid:" + tokenid : null, h ->
-                ask(Util.isValidAddress(vendorAddr) ? "coins relevant:true address:" + vendorAddr : null, pay -> io.execute(() -> {
+                ask(Util.isValidAddress(vendorAddr) && payToken != null ? "coins relevant:true address:" + vendorAddr + " tokenid:" + payToken : null, pay -> io.execute(() -> {
             DeliveryRules.Inputs in = new DeliveryRules.Inputs();
             in.order = db.order(ref);
             in.mismatch = db.mismatch(in.order);
@@ -1357,7 +1360,8 @@ public class MainActivity extends AppCompatActivity {
     }
     private String itemsText(MerchDb.Order o) {
         try {
-            JSONArray a = new JSONArray(o.items);
+            JSONArray a = Listing.items(o.items);
+            if (a == null) return "(the order's items could not be read)";
             StringBuilder sb = new StringBuilder();
             for (int i = 0; i < a.length(); i++) {
                 JSONObject it = a.optJSONObject(i); if (it == null) continue;
@@ -1368,7 +1372,7 @@ public class MainActivity extends AppCompatActivity {
                 if (i < a.length() - 1) sb.append("\n");
             }
             return sb.length() == 0 ? (o.product.isEmpty() ? "—" : o.product) : sb.toString();
-        } catch (Exception e) { return o.product.isEmpty() ? "—" : o.product; }
+        } catch (Throwable e) { return o.product.isEmpty() ? "—" : o.product; }
     }
     private int statusColor(String s) {
         if (MerchDb.DELIVERED.equals(s) || MerchDb.SHIPPED.equals(s)) return Design.IN;

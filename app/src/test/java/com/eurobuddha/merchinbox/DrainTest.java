@@ -38,7 +38,7 @@ public class DrainTest {
     final Map<String, Integer> decimals = new HashMap<>();
     final Map<String, String> held = new HashMap<>();
     final List<JSONObject> payments = new ArrayList<>();
-    final List<String> sends = new ArrayList<>();
+    final List<String> sends = new ArrayList<>(), coinReads = new ArrayList<>();
 
     /** Runs io work at once, so a test needs only the main looper. */
     static final class Inline extends AbstractExecutorService {
@@ -61,7 +61,7 @@ public class DrainTest {
             } else if (c.startsWith("coins relevant:true tokenid:")) {
                 String id = c.substring(28);
                 r.put("response", new JSONArray().put(new JSONObject().put("coinid", "0x" + "99".repeat(32)).put("tokenid", id).put("tokenamount", held.getOrDefault(id, "0"))));
-            } else if (c.startsWith("coins relevant:true address:")) r.put("response", new JSONArray(payments));
+            } else if (c.startsWith("coins relevant:true address:")) { coinReads.add(c); r.put("response", new JSONArray(payments)); }
             else { if (c.contains("address:" + BUYER)) sends.add(c); r.put("response", new JSONObject().put("txpowid", "0x" + "77".repeat(32))); }
             cb.onResult(r);
             return null;
@@ -204,5 +204,15 @@ public class DrainTest {
         call("maybeAutoDeliver", new Class<?>[]{String.class}, "ORD-AUTO");
         ShadowLooper.idleMainLooper();
         assertEquals(1, sends.size());
+    }
+
+    @Test public void thePaymentReadAsksOnlyForTheCurrencysTokenAndRefusesAFlood() throws Exception {
+        MerchDb.Order o = order("ORD-FLOOD", "Piece", NFT, 1, "10");
+        pay("ORD-FLOOD", "10", tip - 5, "0xF0");
+        for (int i = 0; i < DeliveryRules.MAX_PAYMENT_COINS; i++)
+            payments.add(new JSONObject().put("coinid", "0x" + i).put("tokenid", "0x00").put("amount", "0.000000001").put("created", "1"));
+        send(o, false);
+        assertTrue(coinReads.get(0), coinReads.get(0).endsWith(" tokenid:0x00"));
+        assertTrue("too many coins: nothing is sent (M3)", sends.isEmpty());
     }
 }
