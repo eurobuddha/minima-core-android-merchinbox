@@ -23,7 +23,9 @@ public class MerchDb extends SQLiteOpenHelper implements CommsScanner.MetaStore 
     // statuses
     public static final String PENDING = "PENDING", PAID = "PAID", CONFIRMED = "CONFIRMED",
             SHIPPED = "SHIPPED", DELIVERED = "DELIVERED", UNDERPAID = "UNDERPAID", WRONG_TOKEN = "WRONG_TOKEN",
-            INQUIRY = "INQUIRY";
+            INQUIRY = "INQUIRY",
+            /** An order whose stated token id is not its currency's token (or whose currency is not payable). */
+            TOKEN_MISMATCH = "TOKEN_MISMATCH";
 
     public MerchDb(Context ctx) { super(ctx, DB, null, VERSION); }
 
@@ -56,8 +58,13 @@ public class MerchDb extends SQLiteOpenHelper implements CommsScanner.MetaStore 
 
     // ----- orders -----
 
-    /** Insert an incoming order/inquiry (dedup on ref; never overwrites an existing one's status). */
+    /** Insert an incoming order/inquiry (dedup on ref; never overwrites an existing one's status).
+     *  The token an order is paid in follows from its currency ({@link MerchMessage#tokenFor}), never from the token id
+     *  it states: the row holds the currency's token ("" when the currency is not payable), and an ORDER whose stated
+     *  token id disagrees is kept but flagged {@link #TOKEN_MISMATCH} (never auto-delivered). */
     public boolean upsertOrder(MerchMessage m, String role, String coinid) {
+        String want = MerchMessage.tokenFor(m.currency);
+        boolean mismatch = MerchMessage.ORDER.equals(m.type) && MerchMessage.tokenProblem(m.currency, m.tokenid) != null;
         ContentValues v = new ContentValues();
         v.put("ref", m.ref); v.put("role", role);
         // the "other party": for a seller that's the order's sender (buyer); for a buyer it's the recipient (vendor)
@@ -65,9 +72,9 @@ public class MerchDb extends SQLiteOpenHelper implements CommsScanner.MetaStore 
         v.put("counterpartyname", m.fromname); v.put("payaddr", m.buyerPayaddr);
         v.put("shopid", m.shopId); v.put("shopname", m.shopName);
         v.put("items", m.items); v.put("product", m.product); v.put("amount", m.amount);
-        v.put("currency", m.currency); v.put("tokenid", m.tokenid); v.put("shipping", m.shipping);
+        v.put("currency", m.currency); v.put("tokenid", want == null ? "" : want); v.put("shipping", m.shipping);
         v.put("delivery", m.delivery); v.put("message", m.message);
-        v.put("status", MerchMessage.INQUIRY.equals(m.type) ? INQUIRY : PENDING); v.put("coinid", coinid);
+        v.put("status", MerchMessage.INQUIRY.equals(m.type) ? INQUIRY : mismatch ? TOKEN_MISMATCH : PENDING); v.put("coinid", coinid);
         v.put("date", m.date > 0 ? m.date : System.currentTimeMillis()); v.put("read", 0);
         long id = getWritableDatabase().insertWithOnConflict(ORD, null, v, SQLiteDatabase.CONFLICT_IGNORE);
         return id != -1;
@@ -99,14 +106,17 @@ public class MerchDb extends SQLiteOpenHelper implements CommsScanner.MetaStore 
 
     /**
      * Record a payment coin and run the verification gate: PAID only if the coin's amount >= the ordered
-     * total AND the tokenid matches; else UNDERPAID / WRONG_TOKEN. Never downgrades a fulfilled order.
-     * Returns the resulting status (or null if no such order).
+     * total AND the token actually received is the order CURRENCY's token ({@link MerchMessage#tokenFor}; the
+     * stored token id is not trusted: rows from older versions hold it as the buyer sent it); else UNDERPAID /
+     * WRONG_TOKEN. Only PAID sets {@code paid}. The first payment coin decides, as before: a replay or a later
+     * coin changes nothing (returns null). Never downgrades a fulfilled order.
+     * Returns the resulting status (or null if no such order, or a payment was already recorded).
      */
     public String recordPayment(String ref, String paidAmount, String paidTokenid) {
         Order o = order(ref);
-        if (o == null) return null;
-        String result;
-        boolean tokenOk = paidTokenid != null && paidTokenid.equalsIgnoreCase(o.tokenid);
+        if (o == null || o.paid || !o.paidTokenid.isEmpty()) return null;
+        String result, want = MerchMessage.tokenFor(o.currency);
+        boolean tokenOk = want != null && want.equalsIgnoreCase(paidTokenid);
         boolean amountOk;
         try { amountOk = new BigDecimal(paidAmount).compareTo(new BigDecimal(o.amount)) >= 0; }
         catch (Exception e) { amountOk = false; }
@@ -115,7 +125,7 @@ public class MerchDb extends SQLiteOpenHelper implements CommsScanner.MetaStore 
         else result = PAID;
 
         ContentValues v = new ContentValues();
-        v.put("paid", 1); v.put("paidamount", paidAmount); v.put("paidtokenid", paidTokenid);
+        v.put("paid", PAID.equals(result) ? 1 : 0); v.put("paidamount", paidAmount); v.put("paidtokenid", paidTokenid == null ? "" : paidTokenid);
         // only move the lifecycle status forward from PENDING (don't clobber CONFIRMED/SHIPPED/…)
         if (PENDING.equals(o.status) || o.status == null || o.status.isEmpty()) v.put("status", result);
         getWritableDatabase().update(ORD, v, "ref=?", new String[]{ref});

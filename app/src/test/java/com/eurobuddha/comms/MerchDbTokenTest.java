@@ -1,0 +1,78 @@
+package com.eurobuddha.comms;
+
+import static org.junit.Assert.*;
+
+import android.content.ContentValues;
+import org.junit.After;
+import org.junit.Before;
+import org.junit.Test;
+import org.junit.runner.RunWith;
+import org.robolectric.RobolectricTestRunner;
+import org.robolectric.RuntimeEnvironment;
+import org.robolectric.annotation.Config;
+
+/** Vendor side: the token an order is paid in follows from its currency; a stated token id that disagrees is
+ *  flagged, and PAID is decided by the token actually received, never by the token the order names. */
+@RunWith(RobolectricTestRunner.class) @Config(sdk = 33, manifest = Config.NONE)
+public class MerchDbTokenTest {
+    static final String MXUSD = "0x7D39745FBD29049BE29850B55A18BF550E4D442F930F86266E34193D89042A90";
+    MerchDb db;
+
+    @Before public void open() { db = new MerchDb(RuntimeEnvironment.getApplication()); }
+    @After public void close() { db.close(); }
+
+    static MerchMessage order(String ref, String type, String currency, String tokenid) {
+        MerchMessage m = new MerchMessage();
+        m.type = type; m.ref = ref; m.from = "0xBUYER"; m.to = "0xVENDOR"; m.amount = "5"; m.currency = currency; m.tokenid = tokenid;
+        return m;
+    }
+
+    @Test public void anOrderSayingMxUsdWithTheMinimaIdIsFlaggedAndNotPaidByMinima() {
+        assertTrue(db.upsertOrder(order("ORD-A", MerchMessage.ORDER, "USDT", "0x00"), "seller", "0xC01"));
+        MerchDb.Order o = db.order("ORD-A");
+        assertEquals(MerchDb.TOKEN_MISMATCH, o.status);
+        assertEquals(MXUSD, o.tokenid);
+        assertEquals(MerchDb.WRONG_TOKEN, db.recordPayment("ORD-A", "5", "0x00"));
+        o = db.order("ORD-A");
+        assertFalse("never marked paid in the stated token", o.paid);
+        assertEquals(MerchDb.TOKEN_MISMATCH, o.status);
+        assertEquals("0x00", o.paidTokenid);
+        assertNull("the first payment decides; a replay changes nothing", db.recordPayment("ORD-A", "5", MXUSD));
+    }
+
+    @Test public void aRowStoredBeforeTheFixIsJudgedByItsCurrency() {
+        ContentValues v = new ContentValues();   // what older versions stored: the buyer's token id as sent
+        v.put("ref", "ORD-OLD"); v.put("role", "seller"); v.put("amount", "5"); v.put("currency", "USDT");
+        v.put("tokenid", "0x00"); v.put("status", MerchDb.PENDING); v.put("date", 1L);
+        db.getWritableDatabase().insert("orders", null, v);
+        assertEquals(MerchDb.WRONG_TOKEN, db.recordPayment("ORD-OLD", "5", "0x00"));
+        assertFalse(db.order("ORD-OLD").paid);
+        assertEquals(MerchDb.WRONG_TOKEN, db.order("ORD-OLD").status);
+    }
+
+    @Test public void theCurrencysTokenInFullIsPaid() {
+        db.upsertOrder(order("ORD-B", MerchMessage.ORDER, "USDT", MXUSD.toLowerCase()), "seller", "0xC02");
+        assertEquals(MerchDb.PENDING, db.order("ORD-B").status);
+        assertEquals(MerchDb.PAID, db.recordPayment("ORD-B", "5", MXUSD));
+        assertTrue(db.order("ORD-B").paid);
+
+        db.upsertOrder(order("ORD-C", MerchMessage.ORDER, "Minima", ""), "seller", "0xC03");
+        assertEquals("0x00", db.order("ORD-C").tokenid);
+        assertEquals(MerchDb.UNDERPAID, db.recordPayment("ORD-C", "4.99999999", "0x00"));
+        assertFalse(db.order("ORD-C").paid);
+    }
+
+    @Test public void anUnpayableCurrencyIsFlaggedAndNeverPaid() {
+        db.upsertOrder(order("ORD-D", MerchMessage.ORDER, "BTC", "0x00"), "seller", "0xC04");
+        assertEquals(MerchDb.TOKEN_MISMATCH, db.order("ORD-D").status);
+        assertEquals("", db.order("ORD-D").tokenid);
+        assertEquals(MerchDb.WRONG_TOKEN, db.recordPayment("ORD-D", "5", "0x00"));
+        assertFalse(db.order("ORD-D").paid);
+    }
+
+    @Test public void anInquiryStaysAnInquiry() {
+        db.upsertOrder(order("INQ-E", MerchMessage.INQUIRY, "Minima", MXUSD), "seller", "0xC05");
+        assertEquals(MerchDb.INQUIRY, db.order("INQ-E").status);
+        assertEquals("0x00", db.order("INQ-E").tokenid);
+    }
+}

@@ -320,12 +320,12 @@ public class MainActivity extends AppCompatActivity {
         String ref = hexToText(refHex);
         if (ref.isEmpty()) return false;
         MerchDb.Order o = db.order(ref);
-        if (o == null || o.paid) return false;   // replay guard: backfill/grow-passes/restarts re-see coins
+        if (o == null || o.paid) return false;   // replay guard: backfill/grow-passes/restarts re-see coins (recordPayment guards too)
         String amount = coin.optString("amount", coin.optString("tokenamount", "0"));
         String tokenid = coin.optString("tokenid", "0x00");
         String result = db.recordPayment(ref, amount, tokenid);
-        // Auto-deliver only on a clean PAID — never UNDERPAID/WRONG_TOKEN (o.paid is true even then,
-        // which is why this keys off the returned status). Queued, drained at scan end.
+        // Auto-deliver only on a clean PAID (the token received is the order currency's) — never
+        // UNDERPAID/WRONG_TOKEN, and maybeAutoDeliver also skips a TOKEN_MISMATCH order. Queued, drained at scan end.
         if (MerchDb.PAID.equals(result)) pendingAutoDeliver.add(ref);
         return result != null;
     }
@@ -541,11 +541,20 @@ public class MainActivity extends AppCompatActivity {
         st.addView(Design.pill(this, inquiry ? "ENQUIRY" : o.status, statusColor(o.status), Design.ON_ACCENT));
         if (!inquiry) {
             TextView paid = new TextView(this);
-            paid.setText(o.paid ? "  paid " + o.paidAmount + " " + dispCurrency(o) : "  awaiting payment");
+            // paid = the currency's own token arrived in full; anything else received is named by its whole token id
+            paid.setText(o.paid ? "  paid " + o.paidAmount + " " + dispCurrency(o)
+                    : o.paidTokenid.isEmpty() ? "  awaiting payment" : "  received " + o.paidAmount + " of token " + o.paidTokenid);
             paid.setTextColor(o.paid ? Design.IN : Design.DIM); paid.setTextSize(12f);
             st.addView(paid);
         }
         st.setPadding(0, 0, 0, dp(10)); body.addView(st);
+        if (MerchDb.TOKEN_MISMATCH.equals(o.status)) {
+            String want = MerchMessage.tokenFor(o.currency);
+            body.addView(label(want == null
+                    ? "This order asks to be paid in \"" + o.currency + "\", which is neither Minima nor MxUSD. It is never marked paid or auto-delivered."
+                    : "This order names a token that is not its currency's. It counts as paid only in " + MerchMessage.tokenName(want)
+                            + "\n" + want + "\nand is never auto-delivered."));
+        }
 
         if (!inquiry) {
             // line items + totals
@@ -1177,7 +1186,7 @@ public class MainActivity extends AppCompatActivity {
     private int statusColor(String s) {
         if (MerchDb.DELIVERED.equals(s) || MerchDb.SHIPPED.equals(s)) return Design.IN;
         if (MerchDb.PAID.equals(s) || MerchDb.CONFIRMED.equals(s)) return Design.ACCENT;
-        if (MerchDb.UNDERPAID.equals(s) || MerchDb.WRONG_TOKEN.equals(s)) return Design.RED;
+        if (MerchDb.UNDERPAID.equals(s) || MerchDb.WRONG_TOKEN.equals(s) || MerchDb.TOKEN_MISMATCH.equals(s)) return Design.RED;
         return Design.DIM2;
     }
     private static String shortId(String s) {

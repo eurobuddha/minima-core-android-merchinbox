@@ -16,6 +16,38 @@ public class MerchMessage {
     public static final String BUYER_REPLY = "BUYER_REPLY";  // buyer -> vendor free text
     public static final String STATUS_UPDATE = "STATUS_UPDATE";
 
+    // ---- the one rule for which token pays a shop or an order (shop, studio and inbox alike) ----
+    public static final String MINIMA_TOKEN = "0x00";
+    public static final String MXUSD_TOKEN = "0x7D39745FBD29049BE29850B55A18BF550E4D442F930F86266E34193D89042A90";
+
+    /** The token a currency is paid in: "Minima" pays 0x00, "USDT" or "mxUSDT" (the wire values for MxUSD) pay
+     *  MxUSD, any case; anything else null (not payable). A .shop's or an order's own tokenid never decides it. */
+    public static String tokenFor(String currency) {
+        if ("Minima".equalsIgnoreCase(currency)) return MINIMA_TOKEN;
+        if ("USDT".equalsIgnoreCase(currency) || "mxUSDT".equalsIgnoreCase(currency)) return MXUSD_TOKEN;
+        return null;
+    }
+
+    /** "Minima" or "MxUSD" for a token from {@link #tokenFor}. */
+    public static String tokenName(String tokenid) { return MINIMA_TOKEN.equals(tokenid) ? "Minima" : "MxUSD"; }
+
+    /** Why a currency and a stated token id cannot be paid together, or null when they agree. A token id that is
+     *  absent or empty defers to the currency; one that is present must be the currency's token (hex, any case). */
+    public static String tokenProblem(String currency, String tokenid) {
+        String t = tokenFor(currency);
+        if (t == null) return "This shop asks to be paid in \"" + shown(currency) + "\". miniMall pays in Minima or MxUSD only. Nothing was sent.";
+        if (tokenid != null && !tokenid.isEmpty() && !tokenid.equalsIgnoreCase(t))
+            return "This shop says it is paid in " + tokenName(t) + " but names another token:\n" + shown(tokenid)
+                    + "\n\nNothing was sent. Ask the vendor for a corrected .shop file.";
+        return null;
+    }
+
+    /** A vendor-supplied value in a message: whole up to 80 characters (a token id is 66), else only its length. */
+    private static String shown(String v) {
+        if (v == null) return "";
+        return v.length() <= 80 ? v : "a value of " + v.length() + " characters";
+    }
+
     public String type = ORDER;
     public String ref = "";
     public String randomid = "";
@@ -28,8 +60,8 @@ public class MerchMessage {
     public String items = "";       // JSON array string: [{product,size,quantity,unitPrice,lineTotal}]
     public String product = "";     // human summary, e.g. "Coffee x2, Tea"
     public String amount = "";      // order total, decimal string
-    public String currency = "";    // display label: "Minima" | "USDT"
-    public String tokenid = "";     // 0x00 | mxUSDT id
+    public String currency = "";    // .shop schema value: "Minima" | "USDT" (the latter is shown as MxUSD)
+    public String tokenid = "";     // 0x00 | MxUSD id
     public String shipping = "";    // uk | intl | digital
     public String delivery = "";    // postal address or email (private; only the vendor decrypts it)
     public String buyerPayaddr = ""; // buyer's Minima receiving address (for refunds / paying them)
