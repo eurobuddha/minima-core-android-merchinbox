@@ -61,6 +61,17 @@ public class MerchDb extends SQLiteOpenHelper implements CommsScanner.MetaStore 
     @Override public void onOpen(SQLiteDatabase db) {
         super.onOpen(db);
         if (db.isReadOnly()) return;
+        // Rows stored with the old TOKEN_MISMATCH status keep the flag even if the status changes (review L3).
+        boolean flagged;
+        try (Cursor c = db.rawQuery("SELECT v FROM " + META + " WHERE k='migrated:mismatch-flag'", null)) { flagged = c.moveToFirst(); }
+        if (!flagged) {
+            db.beginTransaction();
+            try {
+                db.execSQL("INSERT OR REPLACE INTO " + META + " (k, v) SELECT 'mismatch:' || ref, '1' FROM " + ORD + " WHERE status='" + TOKEN_MISMATCH + "'");
+                db.execSQL("INSERT OR REPLACE INTO " + META + " (k, v) VALUES ('migrated:mismatch-flag', '1')");
+                db.setTransactionSuccessful();
+            } finally { db.endTransaction(); }
+        }
         try (Cursor c = db.rawQuery("SELECT v FROM " + META + " WHERE k='migrated:paid-only-on-paid'", null)) { if (c.moveToFirst()) return; }
         db.beginTransaction();
         try {
@@ -186,6 +197,25 @@ public class MerchDb extends SQLiteOpenHelper implements CommsScanner.MetaStore 
      *  else the buyer's own figure (an order the Inbox could not check; the order screen says so). */
     public String due(Order o) { String d = getMeta("due:" + o.ref, ""); return d.isEmpty() ? o.amount : d; }
 
+    /** After the due amount changed (a listing was imported or re-read), PAID follows it: an order paid against
+     *  an older figure becomes UNDERPAID again (and further coins count) when what was received is now short,
+     *  and an UNDERPAID order becomes PAID when it now suffices (review L4). Vendor-advanced statuses are kept. */
+    public void reevaluate(String ref) {
+        Order o = order(ref);
+        if (o == null) return;
+        String want = MerchMessage.tokenFor(o.currency);
+        if (want == null || !want.equalsIgnoreCase(o.paidTokenid)) return;
+        boolean full;
+        try { BigDecimal d = new BigDecimal(due(o)); full = d.signum() > 0 && new BigDecimal(o.paidAmount).compareTo(d) >= 0; }
+        catch (Exception e) { full = false; }
+        if (full == o.paid) return;
+        ContentValues v = new ContentValues();
+        v.put("paid", full ? 1 : 0);
+        if (full && (PENDING.equals(o.status) || UNDERPAID.equals(o.status) || WRONG_TOKEN.equals(o.status))) v.put("status", PAID);
+        if (!full && PAID.equals(o.status)) v.put("status", UNDERPAID);
+        getWritableDatabase().update(ORD, v, "ref=?", new String[]{ref});
+    }
+
     /** True when the due amount was recomputed from the vendor's own listing. */
     public boolean checked(Order o) { return o != null && !getMeta("due:" + o.ref, "").isEmpty(); }
 
@@ -195,7 +225,7 @@ public class MerchDb extends SQLiteOpenHelper implements CommsScanner.MetaStore 
     /** Checked again at the moment of sending anything for an order: PAID, not mismatched, received in the
      *  currency's token, and what was received >= what is due > 0 (exact decimals). */
     public boolean deliverable(Order o) {
-        if (o == null || !o.paid || mismatch(o) || !listingProblems(o).isEmpty()) return false;
+        if (o == null || !o.paid || mismatch(o) || !checked(o) || !listingProblems(o).isEmpty()) return false;   // never the buyer's figure (review M2)
         String want = MerchMessage.tokenFor(o.currency);
         if (want == null || !want.equalsIgnoreCase(o.paidTokenid)) return false;
         try { BigDecimal d = new BigDecimal(due(o)); return d.signum() > 0 && new BigDecimal(o.paidAmount).compareTo(d) >= 0; }

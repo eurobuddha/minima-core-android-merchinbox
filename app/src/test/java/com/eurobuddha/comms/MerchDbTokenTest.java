@@ -169,6 +169,8 @@ public class MerchDbTokenTest {
         db.upsertOrder(order("ORD-R", MerchMessage.ORDER, "USDT", MXUSD), "seller", "0xC16");
         assertFalse(db.deliverable(db.order("ORD-R")));
         db.recordPayment("ORD-R", "0xE1", "5", MXUSD);
+        assertFalse("never deliverable on the buyer's own figure (M2)", db.deliverable(db.order("ORD-R")));
+        db.setMeta("due:ORD-R", "5"); db.setMeta("listingproblem:ORD-R", "");
         assertTrue(db.deliverable(db.order("ORD-R")));
     }
 
@@ -179,9 +181,33 @@ public class MerchDbTokenTest {
         assertEquals(MerchDb.UNDERPAID, db.recordPayment("ORD-DUE", "0xE2", "0.000000001", "0x00"));
         assertFalse(db.order("ORD-DUE").paid);
         assertEquals(MerchDb.PAID, db.recordPayment("ORD-DUE", "0xE3", "16.499999999", "0x00"));
+        db.setMeta("listingproblem:ORD-DUE", "");
         assertTrue(db.deliverable(db.order("ORD-DUE")));
         db.setMeta("listingproblem:ORD-DUE", "\"Print\" is not in your listing");
         assertFalse("an order that departs from the listing is never delivered", db.deliverable(db.order("ORD-DUE")));
+    }
+
+    @Test public void aRaisedDueReopensAPaidOrderAndFurtherCoinsCount() {
+        MerchMessage m = order("ORD-UP", MerchMessage.ORDER, "Minima", "0x00"); m.amount = "5";
+        db.upsertOrder(m, "seller", "0xC18");
+        assertEquals(MerchDb.PAID, db.recordPayment("ORD-UP", "0xF1", "5", "0x00"));   // paid against the buyer's figure
+        db.setMeta("due:ORD-UP", "8"); db.reevaluate("ORD-UP");                       // the listing says 8
+        assertFalse(db.order("ORD-UP").paid);
+        assertEquals(MerchDb.UNDERPAID, db.order("ORD-UP").status);
+        assertEquals(MerchDb.PAID, db.recordPayment("ORD-UP", "0xF2", "3", "0x00"));
+        db.setMeta("due:ORD-UP", "7"); db.reevaluate("ORD-UP");
+        assertTrue(db.order("ORD-UP").paid);
+    }
+
+    @Test public void anOldTokenMismatchStatusBecomesADurableFlag() {
+        ContentValues v = new ContentValues();
+        v.put("ref", "ORD-OLDMIS"); v.put("role", "seller"); v.put("amount", "5"); v.put("currency", "Minima");
+        v.put("tokenid", "0x00"); v.put("status", MerchDb.TOKEN_MISMATCH); v.put("date", 1L);
+        db.getWritableDatabase().insert("orders", null, v);
+        db.getWritableDatabase().delete("meta", "k=?", new String[]{"migrated:mismatch-flag"});
+        db.close(); db = new MerchDb(RuntimeEnvironment.getApplication());
+        db.setStatus("ORD-OLDMIS", MerchDb.CONFIRMED);
+        assertTrue(db.mismatch(db.order("ORD-OLDMIS")));
     }
 
     @Test public void anInquiryStaysAnInquiry() {

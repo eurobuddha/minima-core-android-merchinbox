@@ -389,6 +389,7 @@ public class MainActivity extends AppCompatActivity {
             for (String p : c.problems) { if (kept.size() == 20) { kept.add("… and " + (c.problems.size() - 20) + " more"); break; } kept.add(Listing.cap(p, 400)); }
             db.setMeta("due:" + o.ref, c.due);
             db.setMeta("listingproblem:" + o.ref, String.join("\n", kept));
+            db.reevaluate(o.ref);   // PAID follows the recomputed due (review L4)
         } catch (Throwable e) {
             db.setMeta("listingproblem:" + o.ref, "this order could not be checked against your listing; nothing is sent for it");
         }
