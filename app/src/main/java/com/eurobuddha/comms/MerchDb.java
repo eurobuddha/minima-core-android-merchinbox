@@ -117,8 +117,8 @@ public class MerchDb extends SQLiteOpenHelper implements CommsScanner.MetaStore 
         if (o == null || o.paid || !o.paidTokenid.isEmpty()) return null;
         String result, want = MerchMessage.tokenFor(o.currency);
         boolean tokenOk = want != null && want.equalsIgnoreCase(paidTokenid);
-        boolean amountOk;
-        try { amountOk = new BigDecimal(paidAmount).compareTo(new BigDecimal(o.amount)) >= 0; }
+        boolean amountOk;   // exact decimals; an order total that is not above zero is never paid
+        try { BigDecimal due = new BigDecimal(o.amount); amountOk = due.signum() > 0 && new BigDecimal(paidAmount).compareTo(due) >= 0; }
         catch (Exception e) { amountOk = false; }
         if (!tokenOk) result = WRONG_TOKEN;
         else if (!amountOk) result = UNDERPAID;
@@ -130,6 +130,13 @@ public class MerchDb extends SQLiteOpenHelper implements CommsScanner.MetaStore 
         if (PENDING.equals(o.status) || o.status == null || o.status.isEmpty()) v.put("status", result);
         getWritableDatabase().update(ORD, v, "ref=?", new String[]{ref});
         return result;
+    }
+
+    /** What a payment coin carries in its own token: a token coin's {@code tokenamount} (its {@code amount} is the
+     *  Minima that backs the token), a Minima coin's {@code amount}. Missing = "0", which never pays. */
+    public static String coinAmount(org.json.JSONObject coin) {
+        String t = coin.optString("tokenid", MerchMessage.MINIMA_TOKEN);
+        return coin.optString(MerchMessage.MINIMA_TOKEN.equals(t) ? "amount" : "tokenamount", "0");
     }
 
     private List<Order> queryOrders(String sql, String[] args) {

@@ -321,7 +321,7 @@ public class MainActivity extends AppCompatActivity {
         if (ref.isEmpty()) return false;
         MerchDb.Order o = db.order(ref);
         if (o == null || o.paid) return false;   // replay guard: backfill/grow-passes/restarts re-see coins (recordPayment guards too)
-        String amount = coin.optString("amount", coin.optString("tokenamount", "0"));
+        String amount = MerchDb.coinAmount(coin);   // a token coin's tokenamount, never the Minima amount backing it
         String tokenid = coin.optString("tokenid", "0x00");
         String result = db.recordPayment(ref, amount, tokenid);
         // Auto-deliver only on a clean PAID (the token received is the order currency's) — never

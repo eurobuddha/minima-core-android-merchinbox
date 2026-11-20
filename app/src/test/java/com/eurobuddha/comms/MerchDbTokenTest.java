@@ -3,6 +3,7 @@ package com.eurobuddha.comms;
 import static org.junit.Assert.*;
 
 import android.content.ContentValues;
+import org.json.JSONObject;
 import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
@@ -68,6 +69,42 @@ public class MerchDbTokenTest {
         assertEquals("", db.order("ORD-D").tokenid);
         assertEquals(MerchDb.WRONG_TOKEN, db.recordPayment("ORD-D", "5", "0x00"));
         assertFalse(db.order("ORD-D").paid);
+    }
+
+    static JSONObject coin(String tokenid, String amount, String tokenamount) throws Exception {
+        return new JSONObject().put("coinid", "0x" + "01".repeat(32)).put("tokenid", tokenid).put("amount", amount).put("tokenamount", tokenamount);
+    }
+
+    @Test public void aFullMxUsdTokenCoinIsPaidByItsTokenAmount() throws Exception {
+        db.upsertOrder(order("ORD-F", MerchMessage.ORDER, "USDT", MXUSD), "seller", "0xC06");
+        JSONObject c = coin(MXUSD, "0.000000000000000000000000000000000005", "5");   // amount = the Minima backing the token
+        assertEquals("5", MerchDb.coinAmount(c));
+        assertEquals(MerchDb.PAID, db.recordPayment("ORD-F", MerchDb.coinAmount(c), MXUSD));
+        assertTrue(db.order("ORD-F").paid);
+    }
+
+    @Test public void aShortMxUsdTokenCoinIsUnderpaid() throws Exception {
+        db.upsertOrder(order("ORD-G", MerchMessage.ORDER, "USDT", MXUSD), "seller", "0xC07");
+        JSONObject c = coin(MXUSD, "0.000000000000000000000000000000000005", "4.999999999999999999999999");
+        assertEquals(MerchDb.UNDERPAID, db.recordPayment("ORD-G", MerchDb.coinAmount(c), MXUSD));
+        assertFalse(db.order("ORD-G").paid);
+    }
+
+    @Test public void minimaOfTheSameNumberDoesNotPayAnMxUsdOrder() throws Exception {
+        db.upsertOrder(order("ORD-H", MerchMessage.ORDER, "USDT", MXUSD), "seller", "0xC08");
+        JSONObject c = coin("0x00", "5", "5");
+        assertEquals("5", MerchDb.coinAmount(c));
+        assertEquals(MerchDb.WRONG_TOKEN, db.recordPayment("ORD-H", MerchDb.coinAmount(c), "0x00"));
+        assertFalse(db.order("ORD-H").paid);
+    }
+
+    @Test public void anOrderTotalThatIsNotAboveZeroIsNeverPaid() throws Exception {
+        for (String due : new String[]{"0", "-5", "0.000", "x"}) {
+            MerchMessage m = order("ORD-Z" + due, MerchMessage.ORDER, "USDT", MXUSD); m.amount = due;
+            db.upsertOrder(m, "seller", "0xC09");
+            assertEquals(due, MerchDb.UNDERPAID, db.recordPayment("ORD-Z" + due, "5", MXUSD));
+            assertFalse(db.order("ORD-Z" + due).paid);
+        }
     }
 
     @Test public void anInquiryStaysAnInquiry() {
