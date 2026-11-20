@@ -67,4 +67,18 @@ public class ListingTest {
         assertFalse(Listing.check(l, order("USDT", "digital", item("Print", 1, "2.5", null))).problems.isEmpty());
         assertFalse(Listing.check(l, order("Minima", "digital")).problems.isEmpty());
     }
+
+    @Test(timeout = 5000) public void hugeBuyerNumbersAreRefusedQuicklyWithShortMessages() throws Exception {
+        JSONObject l = Listing.compact(shop(ME, "Minima", null, "2.5"), ME);
+        for (Object q : new Object[]{"1E+999999999", "1E+3000000", "1e3", "-1", "0", "1.5", "1" + "0".repeat(40), "NaN"}) {
+            Listing.Check c = Listing.check(l, order("Minima", "digital", item("Print", q, "2.5", null)));
+            assertFalse(String.valueOf(q), c.problems.isEmpty());
+            for (String p : c.problems) assertTrue(p.length() + " characters", p.length() < 400);
+        }
+        Listing.Check c = Listing.check(l, order("Minima", "digital", item("Print", 1, "1E+999999999", null)));
+        assertFalse(c.problems.isEmpty());
+        assertTrue(c.problems.get(0).length() < 400);
+        c = Listing.check(l, order("Minima", "x".repeat(100000), item("P".repeat(100000), 1, "2.5", null)));
+        for (String p : c.problems) assertTrue(p.length() + " characters", p.length() < 400);
+    }
 }

@@ -382,12 +382,15 @@ public class MainActivity extends AppCompatActivity {
         if (o == null || !"seller".equals(o.role)) return;
         String raw = db.getMeta("listing:" + o.shopId, "");
         if (raw.isEmpty()) return;
+        db.setMeta("listingproblem:" + o.ref, "this order has not been checked yet");   // fail closed until the check ends (M1)
         try {
             Listing.Check c = Listing.check(new JSONObject(raw), o);
+            List<String> kept = new ArrayList<>();
+            for (String p : c.problems) { if (kept.size() == 20) { kept.add("… and " + (c.problems.size() - 20) + " more"); break; } kept.add(Listing.cap(p, 400)); }
             db.setMeta("due:" + o.ref, c.due);
-            db.setMeta("listingproblem:" + o.ref, String.join("\n", c.problems));
-        } catch (Exception e) {
-            db.setMeta("listingproblem:" + o.ref, "your stored listing could not be read; import your .shop file again");
+            db.setMeta("listingproblem:" + o.ref, String.join("\n", kept));
+        } catch (Throwable e) {
+            db.setMeta("listingproblem:" + o.ref, "this order could not be checked against your listing; nothing is sent for it");
         }
     }
 

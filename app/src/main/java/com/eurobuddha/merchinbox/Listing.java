@@ -64,6 +64,22 @@ final class Listing {
         return out;
     }
 
+    /** A buyer's number, or null unless it is a plain decimal (no exponent) with at most {@code whole} digits
+     *  before the point and {@code decimals} after it; checked on the text first, so "1E+999999999" never
+     *  becomes a huge number or a huge string (security review, M1). */
+    static BigDecimal bounded(String s, int whole, int decimals) {
+        if (s == null || s.length() > whole + decimals + 2) return null;
+        if (!s.matches("\\d{1," + whole + "}" + (decimals > 0 ? "(\\.\\d{1," + decimals + "})?" : ""))) return null;
+        BigDecimal b = new BigDecimal(s);
+        return b.scale() < 0 || b.precision() - b.scale() > whole ? null : b;
+    }
+
+    /** A buyer-supplied value in a message or a stored note: whole up to n characters, else its first n and its length. */
+    static String cap(String s, int n) {
+        if (s == null) return "";
+        return s.length() <= n ? s : s.substring(0, n) + "… (" + s.length() + " characters)";
+    }
+
     /** The one listed product a line names (same name, NFT token id, edition, bundle), or null. */
     static JSONObject product(JSONObject listing, String name, String token, int idx, int bundle) {
         JSONArray products = listing.optJSONArray("products");
@@ -102,20 +118,18 @@ final class Listing {
                 if (p != null && name.equals(p.optString("name")) && token.equalsIgnoreCase(p.optString("nftTokenId"))
                         && idx == p.optInt("nftStateIdx") && bundle == p.optInt("nftBundle")) { match = p; matches++; }
             }
-            String what = "\"" + name + "\"" + (token.isEmpty() ? "" : " (token " + token + (idx > 0 ? " #" + idx : "") + ")");
+            String what = "\"" + cap(name, 60) + "\"" + (token.isEmpty() ? "" : " (token " + cap(token, 80) + (idx > 0 ? " #" + idx : "") + ")");
             if (match == null) { problems.add(what + " is not in your listing"); continue; }
             if (matches > 1) { problems.add(what + " is listed more than once"); continue; }
-            Object q = it.opt("quantity");
-            BigDecimal qty;
-            try { qty = new BigDecimal(String.valueOf(q)); } catch (Exception e) { qty = BigDecimal.ZERO; }
-            if (qty.signum() <= 0 || qty.stripTrailingZeros().scale() > 0) { problems.add(what + ": the quantity " + q + " is not a whole number above zero"); continue; }
+            String q = String.valueOf(it.opt("quantity"));
+            BigDecimal qty = bounded(q, 9, 0);   // a buyer's number: never trusted to be small (M1)
+            if (qty == null || qty.signum() <= 0) { problems.add(what + ": the quantity " + cap(q, 40) + " is not a whole number from 1 to 999999999"); continue; }
             if (qty.compareTo(BigDecimal.valueOf(Math.max(1, match.optInt("maxUnits", 10)))) > 0 || (bundle == 1 || idx > 0) && qty.compareTo(BigDecimal.ONE) != 0) {
                 problems.add(what + ": the quantity " + qty.toPlainString() + " is more than you list (" + (bundle == 1 || idx > 0 ? 1 : match.optInt("maxUnits", 10)) + ")"); continue;
             }
             BigDecimal price = new BigDecimal(match.optString("price"));
-            BigDecimal stated;
-            try { stated = new BigDecimal(it.optString("unitPrice", "")); } catch (Exception e) { stated = null; }
-            if (stated == null || stated.compareTo(price) != 0) { problems.add(what + ": the order's price " + it.optString("unitPrice", "(none)") + " is not your price " + price.toPlainString()); continue; }
+            BigDecimal stated = bounded(it.optString("unitPrice", ""), 30, 44);
+            if (stated == null || stated.compareTo(price) != 0) { problems.add(what + ": the order's price " + cap(it.optString("unitPrice", "(none)"), 60) + " is not your price " + price.toPlainString()); continue; }
             due = due.add(price.multiply(qty));
             BigDecimal together = perProduct.getOrDefault(match, BigDecimal.ZERO).add(qty);
             perProduct.put(match, together);
@@ -129,7 +143,7 @@ final class Listing {
             if (s != null && s.optString("id").equals(o.shipping)) fee = new BigDecimal(s.optString("fee", "0"));
         }
         if (fee == null && (shipping == null || shipping.length() == 0) && (o.shipping == null || o.shipping.isEmpty() || "digital".equals(o.shipping))) fee = BigDecimal.ZERO;
-        if (fee == null) problems.add("the delivery method \"" + o.shipping + "\" is not in your listing");
+        if (fee == null) problems.add("the delivery method \"" + cap(o.shipping, 60) + "\" is not in your listing");
         else due = due.add(fee);
         Check c = new Check(due.toPlainString());
         c.problems.addAll(problems);

@@ -159,6 +159,24 @@ public class InboxShowsIdentifiersWholeTest {
         assertTrue(all, all.contains("are the buyer's own figures"));
     }
 
+    @Test(timeout = 20000) public void anOrderThatCannotBeCheckedStaysBlockedAndItsNoteIsShort() throws Exception {
+        String me = "0x" + "AB".repeat(64);
+        db.setMeta("listing:art", Listing.compact(ListingTest.shop(me, "Minima", null, "2.5"), me).toString());
+        MerchMessage m = new MerchMessage();
+        m.type = MerchMessage.ORDER; m.ref = "ORD-HUGE"; m.from = BUYER; m.to = "0xME"; m.amount = "1"; m.currency = "Minima";
+        m.shopId = "art"; m.shipping = "digital"; m.buyerPayaddr = PAYADDR;
+        StringBuilder items = new StringBuilder("[");
+        for (int i = 0; i < 200; i++) items.append(i == 0 ? "" : ",").append("{\"product\":\"").append("P".repeat(5000)).append("\",\"quantity\":\"1E+999999999\",\"unitPrice\":\"1\"}");
+        m.items = items.append("]").toString();
+        db.upsertOrder(m, "seller", COIN);
+        Method recheck = MainActivity.class.getDeclaredMethod("recheck", MerchDb.Order.class); recheck.setAccessible(true);
+        recheck.invoke(activity, db.order("ORD-HUGE"));
+        String note = db.listingProblems(db.order("ORD-HUGE"));
+        assertFalse(note.isEmpty());
+        assertTrue(note.length() + " characters", note.length() < 10000);
+        assertFalse(db.deliverable(db.order("ORD-HUGE")));
+    }
+
     @Test public void anMxUsdOrderReadsMxUsdNeverTheWireValue() throws Exception {
         MerchMessage m = new MerchMessage();
         m.type = MerchMessage.ORDER; m.ref = "ORD-MXUSD"; m.from = BUYER; m.to = "0xME"; m.amount = "5"; m.currency = "USDT";

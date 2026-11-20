@@ -73,7 +73,7 @@ final class DeliveryRules {
         catch (NumberFormatException e) { v.reasons.add("the quantity is not a number: " + line[2]); }
 
         // 6. recipient
-        if (!Util.isValidAddress(o.payaddr)) v.reasons.add("the order's buyer address is not a valid Minima address: " + o.payaddr);
+        if (!Util.isValidAddress(o.payaddr)) v.reasons.add("the order's buyer address is not a valid Minima address: " + Listing.cap(o.payaddr, 120));
         if (in.mismatch) v.reasons.add("the order names a token that is not its currency's");
 
         // 1 + 2. listing, and only what is listed
