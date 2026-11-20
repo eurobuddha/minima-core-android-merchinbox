@@ -125,4 +125,27 @@ public class ListingTest {
         assertTrue(s, s.contains("~ \"Print\": price 2.5, stock 3\n  → \"Print\": price 3, stock 3"));
         assertTrue(Listing.summary(now, now).contains("Changes from the listing in use:\nnone"));
     }
+
+    @Test public void anUnsignedShopIsUsableOnlyThroughTheWarnedImportAndIsMarkedSo() throws Exception {
+        String plain = shop(ME, "Minima", null, "2.5");                 // the desktop builder's file: no signature
+        JSONObject now = Listing.compact(shop(ME, "Minima", null, "2"), ME);
+        Listing.Prepared u = Listing.prepare(plain, new FakeCrypto(), ME, now);
+        assertFalse(u.signed);
+        assertTrue(u.summary, u.summary.startsWith(Listing.UNSIGNED_WARNING) && u.summary.contains("not signed by this shop's key"));
+        assertTrue(u.summary, u.summary.contains(NFT) && u.summary.contains("fee 1.5") && u.summary.contains("~ \"Print\": price 2, stock 3\n  → \"Print\": price 2.5, stock 3"));
+        assertFalse(u.listing.toString().contains("AAAA"));             // compacted like a signed one
+        // the same rules as a signed file: this shop key only, no NFT for nothing
+        String other = "0x" + "EF".repeat(64);
+        assertThrows(IllegalArgumentException.class, () -> Listing.prepare(shop(other, "Minima", null, "2.5"), new FakeCrypto(), ME, null));
+        assertThrows(IllegalArgumentException.class, () -> Listing.prepare(plain.replace("\"price\":\"10\"", "\"price\":\"0\""), new FakeCrypto(), ME, null));
+        // a file that claims a signature must carry a good one: a bad one is refused, never taken as unsigned
+        String forged = new JSONObject(plain).put("listingSealed", "sealed:" + other + ":" + plain).toString();
+        assertThrows(IllegalArgumentException.class, () -> Listing.prepare(forged, new FakeCrypto(), ME, null));
+        Listing.Prepared s = Listing.prepare(new JSONObject(plain).put("listingSealed", "sealed:" + ME + ":" + plain).toString(), new FakeCrypto(), ME, null);
+        assertTrue(s.signed);
+        assertFalse(s.summary.contains(Listing.UNSIGNED_WARNING));
+        assertEquals("Listing in use: signed by your shop key.", MainActivity.listingInUse("1"));
+        assertEquals("Listing in use: an unsigned file you confirmed (not signed by your shop key).", MainActivity.listingInUse("0"));
+        assertEquals(MainActivity.listingInUse("0"), MainActivity.listingInUse(""));   // stored before the mark existed
+    }
 }

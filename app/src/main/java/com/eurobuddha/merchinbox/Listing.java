@@ -43,6 +43,28 @@ final class Listing {
         return new String(opened.plaintext, java.nio.charset.StandardCharsets.UTF_8);
     }
 
+    /** Said above the summary of a .shop that carries no signature (a shop built with the miniMall-core desktop
+     *  builder, which holds only the public Vendor Card, or with Studio before 0.3.21). */
+    static final String UNSIGNED_WARNING = "⚠ This file is not signed by this shop's key. Be sure it is the .shop you published: every order is checked against what it lists, and what it lists is what may be sent.";
+
+    /** A .shop the vendor is importing: its listing, whether it is signed by this shop key, and the summary to read.
+     *  A signed file must carry a valid signature by this shop key (a bad one is refused, never treated as
+     *  unsigned); an unsigned one is allowed only through this explicit import, with the warning first. The vendor
+     *  key in the file must be this shop key and NFTs priced at 0 are refused either way (compact). */
+    static final class Prepared {
+        final JSONObject listing; final boolean signed; final String summary;
+        Prepared(JSONObject listing, boolean signed, String summary) { this.listing = listing; this.signed = signed; this.summary = summary; }
+    }
+
+    static Prepared prepare(String shopJson, com.eurobuddha.comms.CryptoProvider crypto, String myId, JSONObject current) {
+        boolean signed;
+        try { signed = !new JSONObject(shopJson).optString("listingSealed", "").isEmpty(); }
+        catch (Exception e) { throw new IllegalArgumentException("That is not a .shop file."); }
+        JSONObject listing = compact(signed ? unseal(shopJson, crypto, myId) : shopJson, myId);
+        String s = summary(listing, current);
+        return new Prepared(listing, signed, signed ? s : UNSIGNED_WARNING + "\n\n" + s);
+    }
+
     /** Every product of a compact listing (name, token id whole, price, stock) and its delivery fees, and how it
      *  differs from the current one (null = none), for the vendor to read before "Use this listing". */
     static String summary(JSONObject next, JSONObject current) {

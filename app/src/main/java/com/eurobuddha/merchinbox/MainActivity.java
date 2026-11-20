@@ -365,12 +365,13 @@ public class MainActivity extends AppCompatActivity {
                     if (bos.size() + n > 16 * 1024 * 1024) throw new IllegalArgumentException("That file is too large to be a .shop file.");
                     bos.write(buf, 0, n);
                 }
-                // Only a listing the vendor's own Studio signed with this shop key (M1), shown in full first.
-                final JSONObject listing = Listing.compact(Listing.unseal(new String(bos.toByteArray(), java.nio.charset.StandardCharsets.UTF_8), crypto, me), me);
-                final String shopId = listing.getString("shopId");
-                final String summary = Listing.summary(listing, listingFor(shopId));
-                ui.post(() -> new AlertDialog.Builder(this).setTitle("Use this listing?").setMessage(summary)
-                        .setPositiveButton("Use this listing", (d, w) -> useListing(listing))
+                // Shown in full first, every time; a signed listing must be this shop key's, an unsigned one (desktop
+                // builder, older Studio) is allowed only here, with the warning, and only on "Use this listing".
+                String raw = new String(bos.toByteArray(), java.nio.charset.StandardCharsets.UTF_8);
+                String shopId0 = new JSONObject(raw).optString("shopId", "");
+                final Listing.Prepared p = Listing.prepare(raw, crypto, me, listingFor(shopId0));
+                ui.post(() -> new AlertDialog.Builder(this).setTitle(p.signed ? "Use this listing?" : "Use this UNSIGNED listing?").setMessage(p.summary)
+                        .setPositiveButton("Use this listing", (d, w) -> useListing(p.listing, p.signed))
                         .setNegativeButton("Cancel", null).show());
                 return;
             } catch (IllegalArgumentException e) { msg = e.getMessage(); }
@@ -381,10 +382,17 @@ public class MainActivity extends AppCompatActivity {
     }
 
     /** The vendor read the summary and chose it: stored, and every order of that shop is checked against it again. */
-    private void useListing(final JSONObject listing) {
+    /** The order screen's line on the listing in use; one stored before 0.5.27 carries no mark and is not called signed. */
+    static String listingInUse(String signedMark) {
+        return "1".equals(signedMark) ? "Listing in use: signed by your shop key."
+                : "Listing in use: an unsigned file you confirmed (not signed by your shop key).";
+    }
+
+    private void useListing(final JSONObject listing, final boolean signed) {
         io.execute(() -> {
             String shopId = listing.optString("shopId");
             db.setMeta("listing:" + shopId, listing.toString());
+            db.setMeta("listingsigned:" + shopId, signed ? "1" : "0");   // shown on every order of this shop
             int checked = 0;
             for (MerchDb.Order o : db.orders()) if ("seller".equals(o.role) && shopId.equals(o.shopId)) { recheck(o); checked++; }
             final String say = "Your listing for \"" + listing.optString("shopName", shopId) + "\" is in. " + checked + " order(s) checked against it; new orders are checked as they arrive.";
@@ -652,7 +660,8 @@ public class MainActivity extends AppCompatActivity {
                 TextView cf = label("Two buyers sent orders with this reference (it is public once paid). Nothing is sent for it: ask the buyer who paid, by message, before you send anything by hand outside this app.");
                 cf.setTextColor(Design.RED); body.addView(cf);
             } else if (db.nonce(o).isEmpty()) body.addView(label("This order came from an older Shop without a payment secret: its payment is matched by its reference only."));
-                        String problems = db.listingProblems(o);
+            if (listingFor(o.shopId) != null) body.addView(label(listingInUse(db.getMeta("listingsigned:" + o.shopId, ""))));
+            String problems = db.listingProblems(o);
             TextView chk = label(!problems.isEmpty()
                     ? "Not as you list it, so nothing is sent for this order:\n• " + problems.replace("\n", "\n• ")
                     : db.checked(o) ? "Checked against your listing: due " + db.due(o) + " " + dispCurrency(o) + "."
