@@ -115,6 +115,50 @@ public class InboxShowsIdentifiersWholeTest {
         org.mockito.Mockito.verifyNoInteractions(node);
     }
 
+    @Test public void anOrderCheckedAgainstTheListingIsDueWhatTheVendorListsAndTheAttackNeverSends() throws Exception {
+        com.eurobuddha.comms.NodeApi node = org.mockito.Mockito.mock(com.eurobuddha.comms.NodeApi.class); set("node", node);
+        String me = "0x" + "AB".repeat(64);
+        db.setMeta("listing:art", Listing.compact(ListingTest.shop(me, "Minima", null, "2.5"), me).toString());
+        MerchMessage m = new MerchMessage();
+        m.type = MerchMessage.ORDER; m.ref = "ORD-ATK"; m.from = BUYER; m.to = "0xME"; m.amount = "0.000000001"; m.currency = "Minima";
+        m.shopId = "art"; m.shipping = "digital"; m.buyerPayaddr = PAYADDR;
+        m.items = "[{\"product\":\"Print\",\"quantity\":1000,\"unitPrice\":\"0.000000001\",\"nftTokenId\":\"0x00\"}]";
+        db.upsertOrder(m, "seller", COIN);
+        Method recheck = MainActivity.class.getDeclaredMethod("recheck", MerchDb.Order.class); recheck.setAccessible(true);
+        recheck.invoke(activity, db.order("ORD-ATK"));
+        assertFalse(db.listingProblems(db.order("ORD-ATK")).isEmpty());
+        assertNotEquals(MerchDb.PAID, db.recordPayment("ORD-ATK", "0xA7", "0.000000001", "0x00"));
+        MerchDb.Order o = db.order("ORD-ATK"); o.paid = true; o.payaddr = "0x" + "12".repeat(32);
+        Method send = MainActivity.class.getDeclaredMethod("sendNft", MerchDb.Order.class, String[].class, boolean.class); send.setAccessible(true);
+        send.invoke(activity, o, new String[]{"Print", "0x00", "1000", "0", "0"}, false);
+        org.mockito.Mockito.verifyNoInteractions(node);
+        Method b = MainActivity.class.getDeclaredMethod("buildOrderDetail", String.class); b.setAccessible(true);
+        String all = String.join("\n", texts((View) b.invoke(activity, "ORD-ATK")));
+        assertTrue(all, all.contains("Not as you list it"));
+
+        MerchMessage ok = new MerchMessage();
+        ok.type = MerchMessage.ORDER; ok.ref = "ORD-OK"; ok.from = BUYER; ok.to = "0xME"; ok.amount = "5"; ok.currency = "Minima";
+        ok.shopId = "art"; ok.shipping = "postal"; ok.buyerPayaddr = PAYADDR;
+        ok.items = "[{\"product\":\"Print\",\"quantity\":2,\"unitPrice\":\"2.5\"}]";
+        db.upsertOrder(ok, "seller", COIN);
+        recheck.invoke(activity, db.order("ORD-OK"));
+        assertEquals("6.5", db.due(db.order("ORD-OK")));
+        assertEquals(MerchDb.UNDERPAID, db.recordPayment("ORD-OK", "0xA8", "5", "0x00"));   // the buyer's 5 is not the 6.5 due
+        assertEquals(MerchDb.PAID, db.recordPayment("ORD-OK", "0xA9", "1.5", "0x00"));
+        assertTrue(db.deliverable(db.order("ORD-OK")));
+        all = String.join("\n", texts((View) b.invoke(activity, "ORD-OK")));
+        assertTrue(all, all.contains("Checked against your listing: due 6.5 Minima."));
+    }
+
+    @Test public void anUncheckedOrderSaysItsTotalIsTheBuyersOwnFigure() throws Exception {
+        MerchMessage m = new MerchMessage();
+        m.type = MerchMessage.ORDER; m.ref = "ORD-UN"; m.from = BUYER; m.to = "0xME"; m.amount = "5"; m.currency = "Minima"; m.items = "[]";
+        db.upsertOrder(m, "seller", COIN);
+        Method b = MainActivity.class.getDeclaredMethod("buildOrderDetail", String.class); b.setAccessible(true);
+        String all = String.join("\n", texts((View) b.invoke(activity, "ORD-UN")));
+        assertTrue(all, all.contains("are the buyer's own figures"));
+    }
+
     @Test public void anMxUsdOrderReadsMxUsdNeverTheWireValue() throws Exception {
         MerchMessage m = new MerchMessage();
         m.type = MerchMessage.ORDER; m.ref = "ORD-MXUSD"; m.from = BUYER; m.to = "0xME"; m.amount = "5"; m.currency = "USDT";

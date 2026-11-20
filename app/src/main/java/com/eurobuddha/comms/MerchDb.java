@@ -182,13 +182,20 @@ public class MerchDb extends SQLiteOpenHelper implements CommsScanner.MetaStore 
         return result;
     }
 
-    /** What is due for an order: the buyer's own figure (the Inbox does not yet recompute it). */
-    public String due(Order o) { return o.amount; }
+    /** What is due for an order: the total the Inbox recomputed from the vendor's own listing ("due:" meta),
+     *  else the buyer's own figure (an order the Inbox could not check; the order screen says so). */
+    public String due(Order o) { String d = getMeta("due:" + o.ref, ""); return d.isEmpty() ? o.amount : d; }
+
+    /** True when the due amount was recomputed from the vendor's own listing. */
+    public boolean checked(Order o) { return o != null && !getMeta("due:" + o.ref, "").isEmpty(); }
+
+    /** The ways an order departs from the vendor's listing, one per line ("" = none or not checked). */
+    public String listingProblems(Order o) { return o == null ? "" : getMeta("listingproblem:" + o.ref, ""); }
 
     /** Checked again at the moment of sending anything for an order: PAID, not mismatched, received in the
      *  currency's token, and what was received >= what is due > 0 (exact decimals). */
     public boolean deliverable(Order o) {
-        if (o == null || !o.paid || mismatch(o)) return false;
+        if (o == null || !o.paid || mismatch(o) || !listingProblems(o).isEmpty()) return false;
         String want = MerchMessage.tokenFor(o.currency);
         if (want == null || !want.equalsIgnoreCase(o.paidTokenid)) return false;
         try { BigDecimal d = new BigDecimal(due(o)); return d.signum() > 0 && new BigDecimal(o.paidAmount).compareTo(d) >= 0; }

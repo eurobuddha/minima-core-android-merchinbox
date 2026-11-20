@@ -88,6 +88,7 @@ public class MainActivity extends AppCompatActivity {
     private String filterStatus = "ALL";
     private String filterShop = "ALL";
     private ActivityResultLauncher<String> csvLauncher;
+    private ActivityResultLauncher<String[]> listingLauncher;
 
     private final ExecutorService io = Executors.newSingleThreadExecutor();
     private final Handler ui = new Handler(Looper.getMainLooper());
@@ -131,6 +132,8 @@ public class MainActivity extends AppCompatActivity {
 
         csvLauncher = registerForActivityResult(new ActivityResultContracts.CreateDocument("text/csv"),
                 uri -> { if (uri != null) writeCsv(uri); });
+        listingLauncher = registerForActivityResult(new ActivityResultContracts.OpenDocument(),
+                uri -> { if (uri != null) importListing(uri); });
 
         showOrders();
         if (b != null) {
@@ -300,7 +303,9 @@ public class MainActivity extends AppCompatActivity {
         if (m == null || !opened.fromPublicId.equals(m.from)) return false;   // sig must match claimed sender
         if (!myId.equals(m.to)) return false;                                  // addressed to me
         if (MerchMessage.ORDER.equals(m.type)) {
-            return db.upsertOrder(m, "seller", coinid);
+            boolean fresh = db.upsertOrder(m, "seller", coinid);
+            if (fresh) recheck(db.order(m.ref));   // what is due, from the vendor's own listing
+            return fresh;
         }
         if (MerchMessage.INQUIRY.equals(m.type)) {
             boolean rowNew = db.upsertOrder(m, "seller", coinid);   // ensures the inquiry row exists
@@ -341,6 +346,48 @@ public class MainActivity extends AppCompatActivity {
             notifyNew(newCount);
             refreshVisibleOrderOrList();
         });
+    }
+
+    // ---- the vendor's own listing (Listing) ----
+
+    /** Import the .shop file this vendor published; every order of that shop is checked against it again. */
+    private void importListing(android.net.Uri uri) {
+        final String me = myId;
+        io.execute(() -> {
+            String msg;
+            try (java.io.InputStream is = getContentResolver().openInputStream(uri)) {
+                if (me == null || me.isEmpty()) throw new IllegalArgumentException("Connect your node first: the Inbox needs your shop key to check the file is yours.");
+                java.io.ByteArrayOutputStream bos = new java.io.ByteArrayOutputStream();
+                byte[] buf = new byte[8192]; int n;
+                while ((n = is.read(buf)) != -1) {
+                    if (bos.size() + n > 16 * 1024 * 1024) throw new IllegalArgumentException("That file is too large to be a .shop file.");
+                    bos.write(buf, 0, n);
+                }
+                JSONObject listing = Listing.compact(new String(bos.toByteArray(), java.nio.charset.StandardCharsets.UTF_8), me);
+                String shopId = listing.getString("shopId");
+                db.setMeta("listing:" + shopId, listing.toString());
+                int checked = 0;
+                for (MerchDb.Order o : db.orders()) if ("seller".equals(o.role) && shopId.equals(o.shopId)) { recheck(o); checked++; }
+                msg = "Your listing for \"" + listing.optString("shopName", shopId) + "\" is in. " + checked + " order(s) checked against it; new orders are checked as they arrive.";
+            } catch (IllegalArgumentException e) { msg = e.getMessage(); }
+            catch (Exception e) { msg = "That file could not be read."; }
+            final String say = msg;
+            ui.post(() -> { new AlertDialog.Builder(this).setTitle("Your listing").setMessage(say).setPositiveButton("OK", null).show(); refreshVisibleOrderOrList(); });
+        });
+    }
+
+    /** Recompute what an order is due from the vendor's own listing for its shop, if one was imported. */
+    private void recheck(MerchDb.Order o) {
+        if (o == null || !"seller".equals(o.role)) return;
+        String raw = db.getMeta("listing:" + o.shopId, "");
+        if (raw.isEmpty()) return;
+        try {
+            Listing.Check c = Listing.check(new JSONObject(raw), o);
+            db.setMeta("due:" + o.ref, c.due);
+            db.setMeta("listingproblem:" + o.ref, String.join("\n", c.problems));
+        } catch (Exception e) {
+            db.setMeta("listingproblem:" + o.ref, "your stored listing could not be read; import your .shop file again");
+        }
     }
 
     // ---- automatic NFT delivery ----
@@ -386,6 +433,7 @@ public class MainActivity extends AppCompatActivity {
     private View buildOrders() {
         LinearLayout col = column();
         LinearLayout head = header(shopName.isEmpty() ? "Orders" : shopName, false);
+        head.addView(iconBtn("⇪", () -> listingLauncher.launch(new String[]{"*/*"})));   // import your own .shop (Listing)
         head.addView(iconBtn("⤓", this::exportCsv));          // export orders CSV
         head.addView(iconBtn("≡", this::showIdentityCard));   // ≡ menu → identity card
         col.addView(head);
@@ -558,6 +606,13 @@ public class MainActivity extends AppCompatActivity {
             body.addView(sectionLabel("Items"));
             body.addView(card(itemsText(o)));
             body.addView(kv("Total", o.amount + " " + dispCurrency(o)));
+            String problems = db.listingProblems(o);
+            TextView chk = label(!problems.isEmpty()
+                    ? "Not as you list it, so nothing is sent for this order:\n• " + problems.replace("\n", "\n• ")
+                    : db.checked(o) ? "Checked against your listing: due " + db.due(o) + " " + dispCurrency(o) + "."
+                    : "Unchecked: the items and the total " + o.amount + " " + dispCurrency(o) + " are the buyer's own figures. Import the .shop file you published (⇪ on the orders screen) so the Inbox checks orders against your listing.");
+            if (!problems.isEmpty() || !db.checked(o)) chk.setTextColor(Design.RED);
+            body.addView(chk);
             body.addView(kv("Reference", o.ref));
             if (!o.shopName.isEmpty()) body.addView(kv("Shop", o.shopName));
             if (!o.coinid.isEmpty()) body.addView(copyRow("Order tx", o.coinid, o.coinid));

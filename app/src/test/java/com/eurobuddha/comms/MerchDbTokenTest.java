@@ -172,6 +172,18 @@ public class MerchDbTokenTest {
         assertTrue(db.deliverable(db.order("ORD-R")));
     }
 
+    @Test public void aRecomputedDueReplacesTheBuyersFigure() {
+        MerchMessage m = order("ORD-DUE", MerchMessage.ORDER, "Minima", "0x00"); m.amount = "0.000000001";   // the buyer's own figure
+        db.upsertOrder(m, "seller", "0xC17");
+        db.setMeta("due:ORD-DUE", "16.5");   // what the vendor's listing says it costs
+        assertEquals(MerchDb.UNDERPAID, db.recordPayment("ORD-DUE", "0xE2", "0.000000001", "0x00"));
+        assertFalse(db.order("ORD-DUE").paid);
+        assertEquals(MerchDb.PAID, db.recordPayment("ORD-DUE", "0xE3", "16.499999999", "0x00"));
+        assertTrue(db.deliverable(db.order("ORD-DUE")));
+        db.setMeta("listingproblem:ORD-DUE", "\"Print\" is not in your listing");
+        assertFalse("an order that departs from the listing is never delivered", db.deliverable(db.order("ORD-DUE")));
+    }
+
     @Test public void anInquiryStaysAnInquiry() {
         db.upsertOrder(order("INQ-E", MerchMessage.INQUIRY, "Minima", MXUSD), "seller", "0xC05");
         assertEquals(MerchDb.INQUIRY, db.order("INQ-E").status);
