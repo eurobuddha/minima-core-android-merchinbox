@@ -41,13 +41,9 @@ public class DeliveryGuardTest {
         assertNotNull(DeliveryGuard.token(NFT, null));
     }
 
-    @Test public void neverMoreThanTheVendorHolds() throws Exception {
-        assertNull(DeliveryGuard.held(NFT, "2", coins(NFT, "1", "1")));
-        assertNotNull(DeliveryGuard.held(NFT, "1000", coins(NFT, "1")));
-        assertNotNull(DeliveryGuard.held(NFT, "1", coins("0x" + "CD".repeat(32), "5")));
-        assertNotNull(DeliveryGuard.held(NFT, "1.5", coins(NFT, "5")));
-        assertNotNull(DeliveryGuard.held(NFT, "0", coins(NFT, "5")));
-        assertNotNull(DeliveryGuard.held(NFT, "-1", coins(NFT, "5")));
-        assertNotNull(DeliveryGuard.held(NFT, "1", new JSONObject().put("status", false)));
+    @Test public void whatTheVendorHoldsIsSummedExactly() throws Exception {
+        assertEquals(0, new java.math.BigDecimal("2").compareTo(DeliveryGuard.heldAmount(NFT, coins(NFT, "1", "1"))));
+        assertEquals(0, java.math.BigDecimal.ZERO.compareTo(DeliveryGuard.heldAmount(NFT, coins("0x" + "CD".repeat(32), "5"))));
+        assertNull(DeliveryGuard.heldAmount(NFT, new JSONObject().put("status", false)));
     }
 }

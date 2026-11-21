@@ -40,25 +40,6 @@ final class DeliveryGuard {
         return null;
     }
 
-    /** Why {@code qty} of the token cannot be sent from what the vendor holds (the node's
-     *  {@code coins relevant:true tokenid:} reply), or null. Exact decimals; quantity a whole number above zero. */
-    static String held(String tokenid, String qty, JSONObject reply) {
-        BigDecimal want;
-        try { want = new BigDecimal(qty); } catch (Exception e) { return "the quantity is not a number: " + qty; }
-        if (want.signum() <= 0 || want.stripTrailingZeros().scale() > 0) return "the quantity is not a whole number above zero: " + qty;
-        JSONArray coins = reply == null || !reply.optBoolean("status", false) ? null : reply.optJSONArray("response");
-        if (coins == null) return "your holdings of token " + tokenid + " could not be read; nothing was sent";
-        BigDecimal have = BigDecimal.ZERO;
-        for (int i = 0; i < coins.length(); i++) {
-            JSONObject c = coins.optJSONObject(i);
-            if (c == null || !tokenid.equalsIgnoreCase(c.optString("tokenid", "")) || c.optBoolean("spent", false)) continue;
-            try { have = have.add(new BigDecimal(c.optString("tokenamount", "0"))); }
-            catch (Exception e) { return "your holdings of token " + tokenid + " could not be read; nothing was sent"; }
-        }
-        if (have.compareTo(want) < 0) return "the order asks for " + qty + " of token " + tokenid + " but you hold " + have.toPlainString() + "; nothing was sent";
-        return null;
-    }
-
     /** What the vendor holds of a token (the node's {@code coins relevant:true tokenid:} reply), or null if unreadable. */
     static BigDecimal heldAmount(String tokenid, JSONObject reply) {
         JSONArray coins = reply == null || !reply.optBoolean("status", false) ? null : reply.optJSONArray("response");

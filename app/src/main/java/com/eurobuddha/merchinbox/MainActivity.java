@@ -402,13 +402,13 @@ public class MainActivity extends AppCompatActivity {
         });
     }
 
-    /** The vendor read the summary and chose it: stored, and every order of that shop is checked against it again. */
     /** The order screen's line on the listing in use; one stored before 0.5.27 carries no mark and is not called signed. */
     static String listingInUse(String signedMark) {
         return "1".equals(signedMark) ? "Listing in use: signed by your shop key."
                 : "Listing in use: an unsigned file you confirmed (not signed by your shop key).";
     }
 
+    /** The vendor read the summary and chose it: stored, and every order of that shop is checked against it again. */
     private void useListing(final JSONObject listing, final boolean signed) {
         io.execute(() -> {
             String shopId = listing.optString("shopId");
@@ -422,7 +422,6 @@ public class MainActivity extends AppCompatActivity {
         });
     }
 
-    /** Recompute what an order is due from the vendor's own listing for its shop, if one was imported. */
     /** What another order kept with a ref is due, from the vendor's listing for its shop (null when it departs from the
      *  listing: it never counts as paid), else its own stated amount (no listing: nothing can be sent anyway). */
     private String contenderDue(String ref, JSONObject c) {
@@ -434,6 +433,7 @@ public class MainActivity extends AppCompatActivity {
         try { Listing.Check k = Listing.check(listing, x); return k.problems.isEmpty() ? k.due : null; } catch (Throwable e) { return null; }
     }
 
+    /** Recompute what an order is due from the vendor's own listing for its shop, if one was imported. */
     private void recheck(MerchDb.Order o) {
         if (o == null || !"seller".equals(o.role)) return;
         String raw = db.getMeta("listing:" + o.shopId, "");
@@ -454,11 +454,11 @@ public class MainActivity extends AppCompatActivity {
     // ---- automatic NFT delivery ----
 
 
-    /** Automatic delivery: OFF unless the vendor switches it on ("autosend"; the old "autodeliver" setting, ON by
-     *  default before, is never read). Even ON, an order is sent only when every DeliveryRules check passes. */
     /** The old "autodeliver" setting was on and the one-time notice was not dismissed yet (item 12). */
     boolean autoDeliverWasOn() { return "1".equals(db.getMeta("autodeliver", "")) && db.getMeta("autodeliverbanner", "").isEmpty(); }
 
+    /** Automatic delivery: OFF unless the vendor switches it on ("autosend"; the old "autodeliver" setting, ON by
+     *  default before, is never read). Even ON, an order is sent only when every DeliveryRules check passes. */
     private boolean autoDeliverOn() { return "1".equals(db.getMeta("autosend", "0")); }
 
     /** Auto-send every unsent NFT line of a cleanly-paid order. Idempotent: nftsent: meta skips

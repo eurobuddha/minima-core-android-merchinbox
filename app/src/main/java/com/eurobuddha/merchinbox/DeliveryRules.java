@@ -110,7 +110,7 @@ final class DeliveryRules {
         boolean waiting = false;
         for (String r : reasons) {
             if (r.matches("coin .* has [0-9]+ confirmation\\(s\\); [0-9]+ are needed")) waiting = true;
-            else if (!r.startsWith("paid on chain with enough confirmations: ") && !r.startsWith("not yet paid in full on chain") && !r.equals("the order is not recorded as paid in full against your listing")) return false;
+            else if (!r.startsWith("not yet paid in full on chain") && !r.equals("the order is not recorded as paid in full against your listing")) return false;
         }
         return waiting;
     }
@@ -205,7 +205,7 @@ final class DeliveryRules {
             }
         }
         if (v.due == null || v.due.signum() <= 0 || v.paid.compareTo(v.due) < 0)
-            v.reasons.add("paid on chain with enough confirmations: " + v.paid.toPlainString() + " of " + (v.due == null ? "an unknown amount" : v.due.toPlainString()) + " due");
+            v.reasons.add("not yet paid in full on chain: " + v.paid.toPlainString() + " of " + (v.due == null ? "an unknown amount" : v.due.toPlainString()) + " due has enough confirmations");
         return v;
     }
 
