@@ -345,6 +345,8 @@ public class MainActivity extends AppCompatActivity {
         return result != null;
     }
 
+    private int sweptBlock = -1;
+
     private void onScanDone(int newCount) {
         ui.post(() -> {
             if (!pendingAutoDeliver.isEmpty()) {
@@ -352,7 +354,7 @@ public class MainActivity extends AppCompatActivity {
                 pendingAutoDeliver.clear();
                 for (String r : refs) maybeAutoDeliver(r);
             }
-            if (autoDeliverOn()) autoDeliverSweep();   // each block: lines waiting for confirmations are checked again
+            if (autoDeliverOn() && chainBlock > sweptBlock) { sweptBlock = chainBlock; autoDeliverSweep(); }   // once per block, not per scanner callback
             if (newCount <= 0) return;
             notifyNew(newCount);
             refreshVisibleOrderOrList();
@@ -931,6 +933,7 @@ public class MainActivity extends AppCompatActivity {
         final String key = lineKey(o.ref, line);
         if (!nftSending.add(key)) return;   // one check-and-send per line at a time
         checkDelivery(o.ref, line, v -> {
+            if (auto && DeliveryRules.onlyWaiting(v.reasons)) { nftSending.remove(key); return; }   // confirmations to come: waiting, never a failure
             if (!v.reasons.isEmpty()) { deliverFailed(o, key, "Not sent:\n• " + String.join("\n• ", v.reasons), auto); return; }
             io.execute(() -> {
                 final String why = !db.getMeta("nftsent:" + key, "").isEmpty() ? "this line was already sent"
@@ -1142,7 +1145,9 @@ public class MainActivity extends AppCompatActivity {
 
     private void deliverFailed(MerchDb.Order o, String key, String msg, boolean auto) {
         nftSending.remove(key);
-        if (auto) notifyDelivery(o.ref, false, msg);
+        if (auto) {   // an automatic failure is notified once per line, not at every block (as Pandamonium)
+            if (!"1".equals(db.getMeta("notified:" + key, ""))) { db.setMeta("notified:" + key, "1"); notifyDelivery(o.ref, false, msg); }
+        }
         else new AlertDialog.Builder(this).setTitle("NFT not sent").setMessage(msg).setPositiveButton("OK", null).show();   // whole ids: a dialog, not a toast
         refreshOrderIfTopmost(o.ref);
     }
@@ -1345,7 +1350,7 @@ public class MainActivity extends AppCompatActivity {
                 nftSending.remove(key);
                 String msg = o.ref + " — " + postedIds.size() + " piece(s) delivered, " + sendableLeft + " remain"
                         + (firstError != null ? " (first error: " + firstError + ")" : "") + " — retry to send the rest";
-                if (auto) notifyDelivery(o.ref, false, msg);
+                if (auto) { if (!"1".equals(db.getMeta("notified:" + key, ""))) { db.setMeta("notified:" + key, "1"); notifyDelivery(o.ref, false, msg); } }
                 else toast(msg);
                 refreshOrderIfTopmost(o.ref);
             }
@@ -1663,7 +1668,7 @@ public class MainActivity extends AppCompatActivity {
                     .setSmallIcon(android.R.drawable.ic_dialog_email)
                     .setContentTitle("New shop activity")
                     .setContentText(n + " new order update(s)")
-                    .setAutoCancel(true);
+                    .setAutoCancel(true).setOnlyAlertOnce(true);
             NotificationManagerCompat.from(this).notify(2, b.build());
         } catch (Exception ignored) {}
     }
@@ -1678,7 +1683,7 @@ public class MainActivity extends AppCompatActivity {
                     .setContentTitle(ok ? "Payment received" : "NFT delivery failed")
                     .setContentText(ok ? ref + " paid · NFT sent to the buyer"
                                        : ref + " — open the order to retry")
-                    .setAutoCancel(true);
+                    .setAutoCancel(true).setOnlyAlertOnce(true);
             NotificationManagerCompat.from(this).notify(2, b.build());
         } catch (Exception ignored) {}
     }

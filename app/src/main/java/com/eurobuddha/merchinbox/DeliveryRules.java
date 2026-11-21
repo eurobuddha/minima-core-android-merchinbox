@@ -103,6 +103,17 @@ final class DeliveryRules {
         BigDecimal qty = BigDecimal.ZERO, stock = BigDecimal.ZERO, held, due, paid = BigDecimal.ZERO;
     }
 
+    /** True when the only things missing are confirmations still to come (and the shortfall they leave): a line
+     *  then waits, it has not failed (point release item 3: never a failure notification for it). */
+    static boolean onlyWaiting(List<String> reasons) {
+        boolean waiting = false;
+        for (String r : reasons) {
+            if (r.matches("coin .* has [0-9]+ confirmation\\(s\\); [0-9]+ are needed")) waiting = true;
+            else if (!r.startsWith("paid on chain with enough confirmations: ") && !r.startsWith("not yet paid in full on chain") && !r.equals("the order is not recorded as paid in full against your listing")) return false;
+        }
+        return waiting;
+    }
+
     static Verdict reasons(Inputs in) {
         Verdict v = new Verdict();
         MerchDb.Order o = in.order;

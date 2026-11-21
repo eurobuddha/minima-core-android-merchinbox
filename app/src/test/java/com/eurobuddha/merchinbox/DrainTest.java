@@ -264,4 +264,28 @@ public class DrainTest {
         assertEquals("s5", Listing.id(new JSONObject().put("signedAt", 5)));
         assertEquals("c7", Listing.id(new JSONObject().put("confirmedAt", 7)));
     }
+
+    /** Point release item 3: an automatic attempt that waits for confirmations is not a failure (no notification);
+     *  a real automatic failure is notified once per line, not at every attempt. */
+    @Test public void waitingIsNeverAFailureAndAFailureIsNotifiedOnce() throws Exception {
+        org.robolectric.Shadows.shadowOf(RuntimeEnvironment.getApplication()).grantPermissions("android.permission.POST_NOTIFICATIONS");
+        android.app.NotificationManager nm = (android.app.NotificationManager) RuntimeEnvironment.getApplication().getSystemService(android.content.Context.NOTIFICATION_SERVICE);
+        db.setMeta("autosend", "1");
+        order("ORD-WAIT", "Piece", NFT, 1, "10");
+        pay("ORD-WAIT", "10", tip, "0xC1");   // 1 of 3 confirmations
+        call("maybeAutoDeliver", new Class<?>[]{String.class}, "ORD-WAIT");
+        ShadowLooper.idleMainLooper();
+        assertEquals("waiting: no notification", 0, org.robolectric.Shadows.shadowOf(nm).size());
+        assertTrue(sends.isEmpty());
+        MerchDb.Order f = order("ORD-FAIL", "Art", ART, 1, "1");
+        pay("ORD-FAIL", "1", tip - 5, "0xC2");
+        held.put(ART, "0");                    // a real failure: the vendor no longer holds the token
+        call("maybeAutoDeliver", new Class<?>[]{String.class}, "ORD-FAIL");
+        ShadowLooper.idleMainLooper();
+        assertEquals(1, org.robolectric.Shadows.shadowOf(nm).size());
+        nm.cancelAll();
+        call("maybeAutoDeliver", new Class<?>[]{String.class}, "ORD-FAIL");
+        ShadowLooper.idleMainLooper();
+        assertEquals("notified once per line", 0, org.robolectric.Shadows.shadowOf(nm).size());
+    }
 }
