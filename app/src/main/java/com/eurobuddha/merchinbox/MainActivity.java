@@ -116,6 +116,7 @@ public class MainActivity extends AppCompatActivity {
         ls = Sodium.get();
         db = new MerchDb(getApplicationContext());   // item 8: the store never holds this Activity
         io.execute(this::tagLedger);   // m3, once: earlier deliveries count under the listing then in use
+        io.execute(() -> { autoWasOn = autoDeliverWasOn(); if (autoWasOn) ui.post(this::refreshVisibleOrderOrList); });
         shopName = loadShopName();
 
         root = new LinearLayout(this);
@@ -491,6 +492,9 @@ public class MainActivity extends AppCompatActivity {
 
 
     /** The old "autodeliver" setting was on and the one-time notice was not dismissed yet (item 12). */
+    /** autoDeliverWasOn, read on io at start (the orders screen reads this field, never the database). */
+    volatile boolean autoWasOn;
+
     boolean autoDeliverWasOn() { return "1".equals(db.getMeta("autodeliver", "")) && db.getMeta("autodeliverbanner", "").isEmpty(); }
 
     /** Automatic delivery: OFF unless the vendor switches it on ("autosend"; the old "autodeliver" setting, ON by
@@ -499,18 +503,24 @@ public class MainActivity extends AppCompatActivity {
 
     /** Auto-send every unsent NFT line of a cleanly-paid order. Idempotent: nftsent: meta skips
      *  delivered lines, autoTried caps automatic attempts at one per line per session. */
-    private void maybeAutoDeliver(String ref) {
-        if (!autoDeliverOn()) return;
-        MerchDb.Order o = db.order(ref);
-        if (!db.deliverable(o)) return;
-        if (!MerchDb.PAID.equals(o.status) && !MerchDb.CONFIRMED.equals(o.status)) return;
-        if (o.payaddr == null || o.payaddr.isEmpty()) return;   // undeliverable — order screen explains
-        for (String[] line : nftLines(o)) {
-            String key = lineKey(ref, line);
-            if (!db.getMeta("nftsent:" + key, "").isEmpty()) continue;
-            if (autoTried.contains(key) || !DeliveryLedger.state(db.getReadableDatabase(), ledgerKey(ref, line)).isEmpty()) continue;   // one automatic send per line
-            sendNft(o, line, true);   // runs every DeliveryRules check; a line that fails waits (checked again at the next block)
-        }
+    private void maybeAutoDeliver(final String ref) {
+        io.execute(() -> {   // m4: the checks read the database on io; the sends start on the main thread
+            if (!autoDeliverOn()) return;
+            final MerchDb.Order o = db.order(ref);
+            if (!db.deliverable(o)) return;
+            if (!MerchDb.PAID.equals(o.status) && !MerchDb.CONFIRMED.equals(o.status)) return;
+            if (o.payaddr == null || o.payaddr.isEmpty()) return;   // undeliverable — order screen explains
+            final List<String[]> todo = new ArrayList<>();
+            for (String[] line : nftLines(o)) {
+                String key = lineKey(ref, line);
+                if (!db.getMeta("nftsent:" + key, "").isEmpty()) continue;
+                if (!DeliveryLedger.state(db.getReadableDatabase(), ledgerKey(ref, line)).isEmpty()) continue;   // one automatic send per line
+                todo.add(line);
+            }
+            if (!todo.isEmpty()) ui.post(() -> {
+                for (String[] line : todo) if (!autoTried.contains(lineKey(ref, line))) sendNft(o, line, true);   // every DeliveryRules check runs; a line that fails waits
+            });
+        });
     }
 
     /** Once per process: re-attempt paid-but-unsent NFT orders (failed auto-send last session,
@@ -541,10 +551,10 @@ public class MainActivity extends AppCompatActivity {
         ver.setTextColor(Design.DIM2); ver.setTextSize(10f);
         ver.setPadding(dp(16), dp(2), dp(16), dp(4));
         col.addView(ver);
-        if (autoDeliverWasOn()) {   // once: the old setting was on, automatic delivery is now off until switched on
+        if (autoWasOn) {   // once: the old setting was on, automatic delivery is now off until switched on
             TextView ban = label("Automatic NFT delivery is now OFF after this update. Switch it on again with the \"Auto NFT delivery\" line below; it then sends only for orders that pass every check. (Tap to dismiss.)");
             ban.setTextColor(Design.RED); ban.setPadding(dp(16), dp(4), dp(16), dp(4));
-            ban.setOnClickListener(v -> io.execute(() -> { db.setMeta("autodeliverbanner", "1"); ui.post(() -> refreshTop(buildOrders())); }));
+            ban.setOnClickListener(v -> io.execute(() -> { db.setMeta("autodeliverbanner", "1"); autoWasOn = false; ui.post(() -> refreshTop(buildOrders())); }));
             col.addView(ban);
         }
 
@@ -579,7 +589,8 @@ public class MainActivity extends AppCompatActivity {
         mc.setOnClickListener(v -> {
             final EditText in = new EditText(this);
             in.setInputType(android.text.InputType.TYPE_CLASS_NUMBER); in.setText(String.valueOf(minConf()));
-            dialog().setTitle("Confirmations").setMessage("How many blocks a payment coin must have before an NFT is sent (at least 1).").setView(in)
+            dialog().setTitle("Confirmations").setMessage("How many blocks a payment coin must have before an NFT is sent (at least 1). "
+                    + "Once a payment has them it stays counted, even if a deeper reorganisation of the chain later drops it.").setView(in)
                     .setPositiveButton("Save", (d, w) -> {
                         int n; try { n = Integer.parseInt(in.getText().toString().trim()); } catch (NumberFormatException e) { n = 0; }
                         if (n < 1) { toast("At least 1 confirmation."); return; }
@@ -1518,7 +1529,11 @@ public class MainActivity extends AppCompatActivity {
     private void deliverFailed(MerchDb.Order o, String key, String msg, boolean auto) {
         nftSending.remove(key);
         if (auto) {   // an automatic failure is notified once per line, not at every block (as Pandamonium)
-            if (!"1".equals(db.getMeta("notified:" + key, ""))) { db.setMeta("notified:" + key, "1"); notifyDelivery(o.ref, false, msg); }
+            io.execute(() -> {   // m4: the once-per-line mark is read and written on io
+                if ("1".equals(db.getMeta("notified:" + key, ""))) return;
+                db.setMeta("notified:" + key, "1");
+                ui.post(() -> notifyDelivery(o.ref, false, msg));
+            });
         }
         else dialog().setTitle("NFT not sent").setMessage(msg).setPositiveButton("OK", null).show();   // whole ids: a dialog, not a toast
         refreshOrderIfTopmost(o.ref);
