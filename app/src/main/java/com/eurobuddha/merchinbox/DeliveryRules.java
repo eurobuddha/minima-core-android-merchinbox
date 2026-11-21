@@ -192,7 +192,11 @@ final class DeliveryRules {
             if (c.tokenid != null && !want.equalsIgnoreCase(c.tokenid)) continue;
             switch (c.state) {
                 case PaidCoin.CONFIRMED:
-                    try { v.paid = v.paid.add(new BigDecimal(c.amount)); } catch (RuntimeException ignored) {}
+                    try { v.paid = v.paid.add(new BigDecimal(c.amount)); }
+                    catch (RuntimeException unreadable) {   // never silently 0: said, logged, not counted (M2 b)
+                        v.reasons.add("coin " + c.coinid + ": its amount could not be read, so it is not counted");
+                        android.util.Log.w("miniMallInbox", "coin " + c.coinid + " amount unreadable: " + c.amount, unreadable);
+                    }
                     break;
                 case PaidCoin.WAITING:
                     v.reasons.add("coin " + c.coinid + " has " + Math.max(0, in.tip - c.created + 1) + " confirmation(s); " + in.minConf + " are needed");

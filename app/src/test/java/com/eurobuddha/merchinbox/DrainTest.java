@@ -65,6 +65,12 @@ public class DrainTest {
                 r.put("response", new JSONArray().put(new JSONObject().put("coinid", "0x" + "99".repeat(32)).put("tokenid", id).put("tokenamount", held.getOrDefault(id, "0"))));
             } else if (c.startsWith("coins relevant:true address:")) { coinReads.add(c); r.put("response", new JSONArray(payments)); }
             else if (c.startsWith("coins address:")) r.put("response", new JSONArray(payments));   // a scanner page
+            else if (c.startsWith("coins relevant:false address:")) {   // a find window: the unspent coins of the window
+                coinReads.add(c);
+                JSONArray a = new JSONArray();
+                for (JSONObject p : payments) if (!spent.contains(p.optString("coinid").toLowerCase(java.util.Locale.ROOT))) a.put(p);
+                r.put("response", a);
+            }
             else if (c.startsWith("coins relevant:true coinid:")) {   // a read by id: the coin while it is unspent, else nothing
                 coinReads.add(c);
                 JSONArray a = new JSONArray(); String id = c.substring(27);
@@ -239,7 +245,7 @@ public class DrainTest {
         db.recordPayment("ORD-SPENT", "0xB1", "10", "0x00", null, tip - 5);
         call("confirmSweep", new Class<?>[]{long.class}, tip);   // the per-block sweep reads it back once
         ShadowLooper.idleMainLooper();
-        assertEquals(String.valueOf(tip), db.getMeta("paidconf:0xb1", ""));
+        assertTrue(db.getMeta("paidconf:0xb1", ""), db.getMeta("paidconf:0xb1", "").contains("\"block\":" + tip));
         spent.add("0xb1");                                       // the vendor consolidates the revenue
         send(o, false);
         assertEquals(1, sends.size());
