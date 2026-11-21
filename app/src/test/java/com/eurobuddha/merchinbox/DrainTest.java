@@ -40,7 +40,9 @@ public class DrainTest {
     final List<JSONObject> payments = new ArrayList<>();
     final List<String> sends = new ArrayList<>(), coinReads = new ArrayList<>();
     final java.util.Set<String> spent = new java.util.HashSet<>();
-    String dryInput = "0x" + "98".repeat(32);   // the coin a send dry run says it would spend   // coin ids (lower case) the vendor has since spent
+    String dryInput = "0x" + "98".repeat(32);   // the coin a send dry run says it would spend
+    String sendInput = "0x" + "96".repeat(32);  // the coin a real send reply says it spent
+    boolean rejectSends;   // coin ids (lower case) the vendor has since spent
 
     /** Runs io work at once, so a test needs only the main looper. */
     static final class Inline extends AbstractExecutorService {
@@ -79,7 +81,9 @@ public class DrainTest {
             }
             else if (c.endsWith(" dryrun:true")) r.put("response", new JSONObject().put("body", new JSONObject().put("txn", new JSONObject()
                     .put("inputs", new JSONArray().put(new JSONObject().put("coinid", dryInput))))));   // a dry run: the coins it would spend, nothing sent
-            else { if (c.contains("address:" + BUYER)) sends.add(c); r.put("response", new JSONObject().put("txpowid", "0x" + "77".repeat(32))); }
+            else if (rejectSends && c.startsWith("send ")) { r.put("status", false).put("error", "refused"); }
+            else { if (c.contains("address:" + BUYER)) sends.add(c); r.put("response", new JSONObject().put("txpowid", "0x" + "77".repeat(32))
+                    .put("body", new JSONObject().put("txn", new JSONObject().put("inputs", new JSONArray().put(new JSONObject().put("coinid", sendInput)))))); }
             cb.onResult(r);
             return null;
         }).when(n).cmd(org.mockito.ArgumentMatchers.anyString(), org.mockito.ArgumentMatchers.any());
@@ -397,5 +401,24 @@ public class DrainTest {
             q2.drain();
             assertEquals("a failed coin keeps the bookmark", "1", db.getMeta("scanned_tip_pay_12121212", ""));
         }
+    }
+
+    /** Point release m1: the real send's actual coins join the line's attempt coins; a send refused before it reached
+     *  the node forgets them; a re-send may use other coins when every first-attempt coin was spent for another line. */
+    @Test public void theRealSendsCoinsAreKeptAndASendRefusedFirstForgetsThem() throws Exception {
+        MerchDb.Order o = order("ORD-PIN2", "Art", ART, 1, "1");
+        pay("ORD-PIN2", "1", tip - 5, "0xD2");
+        String[] line = lines(o).get(0);
+        String key = (String) call("lineKey", new Class<?>[]{String.class, String[].class}, "ORD-PIN2", line);
+        rejectSends = true;
+        send(db.order("ORD-PIN2"), false);
+        assertEquals("refused before sending: the attempt coins are forgotten", "", db.getMeta("attemptcoins:" + key, ""));
+        rejectSends = false;
+        db.setMeta("attemptcoins:" + key, new JSONArray().put("0x" + "95".repeat(32)).toString());   // a first attempt's coin
+        db.setMeta("spentby:0x" + "95".repeat(32), "ORD-OTHER:" + NFT);   // spent by this app for another line
+        send(db.order("ORD-PIN2"), false);
+        assertEquals("allowed: the first attempt's coin went elsewhere", 1, sends.size());
+        assertTrue(db.getMeta("attemptcoins:" + key, ""), db.getMeta("attemptcoins:" + key, "").contains(sendInput));
+        assertEquals(key, db.getMeta("spentby:" + sendInput, ""));
     }
 }

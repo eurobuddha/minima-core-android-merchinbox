@@ -1388,7 +1388,7 @@ public class MainActivity extends AppCompatActivity {
                             deliverFailed(o, key, why, auto);
                             return;
                         }
-                        plainSend(o, line, key, auto);
+                        plainSend(o, line, key, auto, dry.substring(0, dry.length() - " dryrun:true".length()));
                     });
                 });
             }
@@ -1417,23 +1417,38 @@ public class MainActivity extends AppCompatActivity {
         java.util.Set<String> first = new java.util.HashSet<>();
         try { JSONArray a = new JSONArray(db.getMeta("attemptcoins:" + key, "[]")); for (int i = 0; i < a.length(); i++) first.add(a.getString(i)); } catch (Exception ignored) {}
         if (first.isEmpty()) { db.setMeta("attemptcoins:" + key, new JSONArray(inputs).toString()); return null; }
-        if (java.util.Collections.disjoint(first, inputs))
-            return "this send would not spend any coin of the first attempt for this line (" + String.join(", ", first)
+        if (java.util.Collections.disjoint(first, inputs)) {
+            // every coin of the first attempt was spent by a transfer this app recorded for another line: the first
+            // attempt cannot have gone, so this one may use other coins
+            boolean elsewhere = true;
+            for (String c : first) { String by = db.getMeta("spentby:" + c, ""); if (by.isEmpty() || by.equals(key)) { elsewhere = false; break; } }
+            if (!elsewhere) return "this send would not spend any coin of the first attempt for this line (" + String.join(", ", first)
                     + "): if the first send went, say so (it WAS sent); nothing was sent";
+            db.setMeta("attemptcoins:" + key, new JSONArray(inputs).toString());
+        }
         return null;
     }
 
-    private void plainSend(final MerchDb.Order o, final String[] line, final String key, final boolean auto) {
-        final String tokenid = line[1], qty = line[2];
+    /** The real send (the same command as its dry run, which CommsTransport.sendPayment would build): its reply's
+     *  actual input coins join the line's attempt coins and are marked spent by this line (point release m1). */
+    private void plainSend(final MerchDb.Order o, final String[] line, final String key, final boolean auto, final String cmd) {
+        final String tokenid = line[1];
         final boolean[] inCall = {true};
-        CommsTransport.sendPayment(node, o.payaddr, qty, tokenid, o.ref, new CommsTransport.SendCb() {
-            @Override public void onSent(final String txid) {
-                markSentAndMaybeAdvance(o, key, txid == null || txid.isEmpty() ? "sent" : txid, auto);
+        node.cmd(cmd, new NodeApi.Cb() {
+            @Override public void onResult(JSONObject j) {
+                if (!(j.optBoolean("status", false) || j.optBoolean("pending", false))) { failed(j.optString("error", "the node rejected the send")); return; }
+                final java.util.Set<String> used = dryRunInputs(j);
+                JSONObject r = j.optJSONObject("response");
+                final String txid = r == null ? "" : r.optString("txpowid", "");
+                io.execute(() -> sentCoins(key, used));
+                markSentAndMaybeAdvance(o, key, txid.isEmpty() ? "sent" : txid, auto);
             }
-            @Override public void onFailed(final String e) {
-                // Refused before anything reached the node: certainly not sent, the line is free again. Any later
-                // failure may have been posted: the line stays reserved until the vendor checks the history.
-                if (inCall[0]) io.execute(() -> DeliveryLedger.mark(db.getWritableDatabase(), ledgerKey(o.ref, line), DeliveryLedger.RELEASED));
+            @Override public void onError(String m) { failed(m); }
+            private void failed(final String e) {
+                // Refused before anything reached the node: certainly not sent, the line is free again and its attempt
+                // coins are forgotten. Any later failure may have been posted: the line stays reserved until the
+                // vendor checks the history.
+                if (inCall[0]) io.execute(() -> { DeliveryLedger.mark(db.getWritableDatabase(), ledgerKey(o.ref, line), DeliveryLedger.RELEASED); db.setMeta("attemptcoins:" + key, ""); });
                 // A StateNFT collection sold by an old .shop has no edition index — `send` fails with
                 // an opaque sendable:0; name the real cause for the vendor.
                 if (isKnownStateCollection(tokenid)) deliverFailed(o, key, "this is a StateNFT collection but the order names no edition — the buyer's miniMall is outdated", auto);
@@ -1441,6 +1456,15 @@ public class MainActivity extends AppCompatActivity {
             }
         });
         inCall[0] = false;
+    }
+
+    /** The coins a sent line actually spent: added to its attempt coins, and each marked spent by this line. */
+    void sentCoins(String key, java.util.Set<String> used) {
+        if (used.isEmpty()) return;
+        java.util.Set<String> all = new java.util.HashSet<>(used);
+        try { JSONArray a = new JSONArray(db.getMeta("attemptcoins:" + key, "[]")); for (int i = 0; i < a.length(); i++) all.add(a.getString(i)); } catch (Exception ignored) {}
+        db.setMeta("attemptcoins:" + key, new JSONArray(all).toString());
+        for (String c : used) db.setMeta("spentby:" + c, key);
     }
 
     // ---- StateNFT piece delivery (state-replay transfer, confirm by coin departure) ----
