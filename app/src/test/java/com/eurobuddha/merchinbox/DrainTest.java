@@ -276,7 +276,7 @@ public class DrainTest {
         assertEquals(0, one.compareTo(DeliveryLedger.delivered(w, p, "s2")));
         assertEquals("in flight still counts across listings", 0, one.compareTo(DeliveryLedger.inflight(w, ART)));
         assertEquals("s5", Listing.id(new JSONObject().put("signedAt", 5)));
-        assertEquals("c7", Listing.id(new JSONObject().put("confirmedAt", 7)));
+        assertTrue(Listing.id(new JSONObject().put("confirmedAt", 7)).startsWith("h"));   // an unsigned listing: its content (m3)
     }
 
     /** Point release item 3: an automatic attempt that waits for confirmations is not a failure (no notification);
@@ -420,5 +420,21 @@ public class DrainTest {
         assertEquals("allowed: the first attempt's coin went elsewhere", 1, sends.size());
         assertTrue(db.getMeta("attemptcoins:" + key, ""), db.getMeta("attemptcoins:" + key, "").contains(sendInput));
         assertEquals(key, db.getMeta("spentby:" + sendInput, ""));
+    }
+
+    /** Point release m3: an unsigned listing's id is its content (confirming it again changes nothing, changing it
+     *  does); ledger rows from before rows named their listing are tagged once with the listing then in use. */
+    @Test public void anUnsignedListingIsItsContentAndOlderRowsAreTaggedOnce() throws Exception {
+        JSONObject l = new JSONObject(db.getMeta("listing:art", ""));
+        String id = Listing.id(l);
+        assertTrue(id, id.matches("h[0-9a-f]{64}"));
+        assertEquals(id, Listing.id(new JSONObject(l.toString()).put("confirmedAt", 123)));
+        assertNotEquals(id, Listing.id(new JSONObject(l.toString()).put("shopName", "Other")));
+        db.setMeta("ledger:ORD-T1|0", new JSONObject().put("product", "art|" + ART.toLowerCase(java.util.Locale.ROOT) + "|0|0").put("token", ART).put("qty", "2").put("state", "sent").toString());
+        call("tagLedger", new Class<?>[]{});
+        assertEquals(id, new JSONObject(db.getMeta("ledger:ORD-T1|0", "")).getString("listing"));
+        db.setMeta("ledger:ORD-T2|0", new JSONObject().put("product", "art|x|0|0").put("token", ART).put("qty", "1").put("state", "sent").toString());
+        call("tagLedger", new Class<?>[]{});
+        assertFalse("once only", new JSONObject(db.getMeta("ledger:ORD-T2|0", "")).has("listing"));
     }
 }

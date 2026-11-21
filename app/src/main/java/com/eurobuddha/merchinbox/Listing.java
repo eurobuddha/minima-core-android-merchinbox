@@ -88,13 +88,19 @@ final class Listing {
         return cap(s == null ? "" : s.replaceAll("[\\p{Cc}\\p{Zl}\\p{Zp}\\u200E\\u200F\\u202A-\\u202E\\u2066-\\u2069]", " "), 60);
     }
 
-    /** Which listing this is, for the delivery ledger (point release item 2): when it was signed, else when the
-     *  vendor confirmed it; "" for a listing stored before either was kept. */
+    /** Which listing this is, for the delivery ledger (point release item 2): when it was signed, else the SHA-256 of
+     *  its compact content (m3: the same unsigned listing confirmed again is the same listing; a changed one is not). */
     static String id(JSONObject listing) {
         if (listing == null) return "";
         if (listing.optLong("signedAt", 0) > 0) return "s" + listing.optLong("signedAt");
-        if (listing.optLong("confirmedAt", 0) > 0) return "c" + listing.optLong("confirmedAt");
-        return "";
+        try {
+            JSONObject c = new JSONObject(listing.toString());
+            c.remove("confirmedAt");
+            byte[] h = java.security.MessageDigest.getInstance("SHA-256").digest(c.toString().getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            StringBuilder b = new StringBuilder("h");
+            for (byte x : h) b.append(String.format(java.util.Locale.ROOT, "%02x", x & 255));
+            return b.toString();
+        } catch (Exception e) { return ""; }
     }
 
     /** Every product of a compact listing (name, token id whole, price, stock) and its delivery fees, and how it

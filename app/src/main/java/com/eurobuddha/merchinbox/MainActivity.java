@@ -115,6 +115,7 @@ public class MainActivity extends AppCompatActivity {
         replyDrafts.restore(b);
         ls = Sodium.get();
         db = new MerchDb(getApplicationContext());   // item 8: the store never holds this Activity
+        io.execute(this::tagLedger);   // m3, once: earlier deliveries count under the listing then in use
         shopName = loadShopName();
 
         root = new LinearLayout(this);
@@ -1261,6 +1262,8 @@ public class MainActivity extends AppCompatActivity {
         if (v.isEmpty()) return 0;
         try { return new JSONObject(v).optLong("until", 0); } catch (org.json.JSONException e) { return 0; }
     }
+
+    void tagLedger() { DeliveryLedger.tagUntagged(db.getWritableDatabase(), shop -> Listing.id(listingFor(shop))); }
 
     /** recordCameFirst for a stored order, from its orderblock and the coins counted for it. */
     boolean recordCameFirst(MerchDb.Order o) {

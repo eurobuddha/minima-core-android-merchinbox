@@ -71,6 +71,31 @@ final class DeliveryLedger {
         return t;
     }
 
+    /** Once (m3): rows reserved before rows named their listing are tagged with the listing then in use for their shop
+     *  ({@code idForShop}: "" when the shop has none, and the row is left as it is). */
+    static void tagUntagged(SQLiteDatabase db, java.util.function.Function<String, String> idForShop) {
+        try (Cursor c = db.rawQuery("SELECT v FROM meta WHERE k='migrated:ledger-listing'", null)) { if (c.moveToFirst()) return; }
+        db.beginTransaction();
+        try {
+            try (Cursor c = db.rawQuery("SELECT k, v FROM meta WHERE k LIKE 'ledger:%'", null)) {
+                while (c.moveToNext()) {
+                    try {
+                        JSONObject r = new JSONObject(c.getString(1));
+                        if (r.has("listing")) continue;
+                        String product = r.optString("product"), shop = product.contains("|") ? product.substring(0, product.indexOf('|')) : "";
+                        String id = shop.isEmpty() ? "" : idForShop.apply(shop);
+                        if (id == null || id.isEmpty()) continue;
+                        ContentValues v = new ContentValues(); v.put("k", c.getString(0)); v.put("v", r.put("listing", id).toString());
+                        db.insertWithOnConflict("meta", null, v, SQLiteDatabase.CONFLICT_REPLACE);
+                    } catch (org.json.JSONException ignored) {}
+                }
+            }
+            ContentValues m = new ContentValues(); m.put("k", "migrated:ledger-listing"); m.put("v", "1");
+            db.insertWithOnConflict("meta", null, m, SQLiteDatabase.CONFLICT_REPLACE);
+            db.setTransactionSuccessful();
+        } finally { db.endTransaction(); }
+    }
+
     /** Reserve a line for sending, or the reason it may not be sent (once only, stock across orders, holding). */
     static String reserve(SQLiteDatabase db, String lineKey, String product, String tokenid, BigDecimal qty, BigDecimal stock, BigDecimal held, String listing) {
         db.beginTransaction();
