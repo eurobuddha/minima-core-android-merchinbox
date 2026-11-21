@@ -166,10 +166,11 @@ public class MainActivity extends AppCompatActivity {
         super.onDestroy();
         if (notifyReceiver != null) try { unregisterReceiver(notifyReceiver); } catch (Exception ignored) {}
         if (node != null) node.onDestroy();
-        io.shutdownNow();
         ui.removeCallbacksAndMessages(null);   // item 8: nothing posted earlier runs against a dead screen
-        db.dues = null;                        // the store keeps no reference to this Activity
-        db.close();
+        // Drain, never drop: every scanned message and payment already queued is stored, the scan bookmarks after
+        // them; the store closes last and keeps no reference to this Activity.
+        try { io.execute(() -> { db.dues = null; db.close(); }); } catch (java.util.concurrent.RejectedExecutionException ignored) {}
+        io.shutdown();
     }
 
     @Override public void onBackPressed() { if (stack.size() > 1) pop(); else super.onBackPressed(); }
@@ -263,25 +264,53 @@ public class MainActivity extends AppCompatActivity {
         });
     }
 
+    /** One scanner's io queue (point release M1): its coins are stored on the io executor, in order, and its bookmarks
+     *  are written through the same queue after them, so a bookmark advances only once every coin of its scan was
+     *  stored; never when one failed (the next scan reads them again: storing is idempotent, nothing is counted twice),
+     *  and never when the queue was dropped because the app was closed or killed first. */
+    final class ScanQueue implements CommsScanner.MetaStore {
+        final java.util.concurrent.atomic.AtomicBoolean failed = new java.util.concurrent.atomic.AtomicBoolean();
+        CommsScanner.Router route(final CommsScanner.Router r) {
+            return (cid, opened, coin) -> {
+                try {
+                    io.execute(() -> {
+                        try { if (r.handle(cid, opened, coin)) routedNew.incrementAndGet(); }
+                        catch (RuntimeException e) { failed.set(true); android.util.Log.w("miniMallInbox", "not stored, the next scan reads it again: " + cid, e); }
+                    });
+                } catch (java.util.concurrent.RejectedExecutionException closing) { failed.set(true); }
+                return false;
+            };
+        }
+        @Override public String getMeta(String k, String def) { return db.getMeta(k, def); }
+        @Override public void setMeta(final String k, final String v) {
+            try {
+                io.execute(() -> {
+                    boolean skip = failed.get();
+                    if (k.startsWith("scanned_tip_")) failed.set(false);   // the scan's last bookmark: the next scan starts clean
+                    if (!skip) db.setMeta(k, v);
+                });
+            } catch (java.util.concurrent.RejectedExecutionException closing) { /* not advanced: read again next time */ }
+        }
+    }
+    private final ScanQueue orderQueue = new ScanQueue(), paymentQueue = new ScanQueue();
+
     /** Item 7: a scanner's message or payment is stored on the io executor (in order: one thread), never on the main
      *  thread; what it adds is counted for the scan's end. */
     private final java.util.concurrent.atomic.AtomicInteger routedNew = new java.util.concurrent.atomic.AtomicInteger();
-    private CommsScanner.Router onIo(final CommsScanner.Router r) {
-        return (cid, opened, coin) -> { io.execute(() -> { if (r.handle(cid, opened, coin)) routedNew.incrementAndGet(); }); return false; };
-    }
+    CommsScanner.Router onIo(final CommsScanner.Router r) { return orderQueue.route(r); }
 
     private void adoptIdentity(CommsIdentity id) {
         identity = id;
         crypto = new LocalEcCryptoProvider(ls, id);
         myId = id.publicId();
-        orderScanner = new CommsScanner(node, crypto, db, CommsTransport.MINIMERCH_ADDRESS,
-                onIo(this::routeIncoming), (ok, n) -> io.execute(() -> onScanDone(routedNew.getAndSet(0))));
+        orderScanner = new CommsScanner(node, crypto, orderQueue, CommsTransport.MINIMERCH_ADDRESS,
+                orderQueue.route(this::routeIncoming), (ok, n) -> io.execute(() -> onScanDone(routedNew.getAndSet(0))));
         if (!vendorAddr.isEmpty()) startPaymentScanner();
     }
 
     private void startPaymentScanner() {
-        paymentScanner = new CommsScanner(node, crypto, db, vendorAddr,
-                onIo(this::routePayment), (ok, n) -> io.execute(() -> {
+        paymentScanner = new CommsScanner(node, crypto, paymentQueue, vendorAddr,
+                paymentQueue.route(this::routePayment), (ok, n) -> io.execute(() -> {
                     onScanDone(routedNew.getAndSet(0));   // after every routed coin (the io executor runs in order)
                     // After the first clean pass, auto-deliver anything paid-but-unsent (e.g. an
                     // auto-send that failed last session, or a payment that landed while closed).

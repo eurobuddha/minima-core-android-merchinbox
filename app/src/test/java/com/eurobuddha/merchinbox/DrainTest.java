@@ -64,6 +64,7 @@ public class DrainTest {
                 String id = c.substring(28);
                 r.put("response", new JSONArray().put(new JSONObject().put("coinid", "0x" + "99".repeat(32)).put("tokenid", id).put("tokenamount", held.getOrDefault(id, "0"))));
             } else if (c.startsWith("coins relevant:true address:")) { coinReads.add(c); r.put("response", new JSONArray(payments)); }
+            else if (c.startsWith("coins address:")) r.put("response", new JSONArray(payments));   // a scanner page
             else if (c.startsWith("coins relevant:true coinid:")) {   // a read by id: the coin while it is unspent, else nothing
                 coinReads.add(c);
                 JSONArray a = new JSONArray(); String id = c.substring(27);
@@ -342,5 +343,53 @@ public class DrainTest {
         activity.finish();
         androidx.appcompat.app.AlertDialog d = ((androidx.appcompat.app.AlertDialog.Builder) call("dialog", new Class<?>[]{})).setMessage("late").show();
         assertFalse("not shown on a finishing screen", d.isShowing());
+    }
+
+    /** Runs io work only when drained; drop() loses it, as a killed app would. */
+    static final class Queued extends AbstractExecutorService {
+        final java.util.ArrayDeque<Runnable> q = new java.util.ArrayDeque<>();
+        public void execute(Runnable r) { q.add(r); }
+        void drain() { while (!q.isEmpty()) q.poll().run(); }
+        void drop() { q.clear(); }
+        public void shutdown() {} public List<Runnable> shutdownNow() { return new ArrayList<>(); }
+        public boolean isShutdown() { return false; } public boolean isTerminated() { return false; }
+        public boolean awaitTermination(long t, TimeUnit u) { return true; }
+    }
+
+    /** Point release M1: a scan whose coins were queued but never stored (the app closed or was killed) leaves its
+     *  bookmark where it was, so the next scan reads them again; nothing is lost and nothing is counted twice. */
+    @Test public void aScanClosedBeforeItsCoinsAreStoredIsReadAgainAndNothingIsCountedTwice() throws Exception {
+        order("ORD-SCAN", "Piece", NFT, 1, "10");
+        payments.add(new JSONObject().put("coinid", "0xE5").put("tokenid", "0x00").put("amount", "10").put("tokenamount", "10").put("created", String.valueOf(tip - 5))
+                .put("state", new JSONArray().put(new JSONObject().put("port", 1).put("data", "0x" + hex("ORD-SCAN")))));
+        Queued q = new Queued(); set("io", q);
+        call("startPaymentScanner", new Class<?>[]{});
+        Field ps = MainActivity.class.getDeclaredField("paymentScanner"); ps.setAccessible(true);
+        ((com.eurobuddha.comms.CommsScanner) ps.get(activity)).scan((int) tip);
+        assertFalse("queued, not stored yet", db.order("ORD-SCAN").paid);
+        q.drop();                                                    // closed or killed before the queue ran
+        assertEquals("the bookmark did not advance", "", db.getMeta("scanned_tip_pay_12121212", ""));
+        set("io", new Inline());
+        call("startPaymentScanner", new Class<?>[]{});
+        ((com.eurobuddha.comms.CommsScanner) ps.get(activity)).scan((int) tip);
+        assertTrue("read again and stored", db.order("ORD-SCAN").paid);
+        assertEquals(String.valueOf(tip), db.getMeta("scanned_tip_pay_12121212", ""));
+        String paid = db.order("ORD-SCAN").paidAmount;
+        call("startPaymentScanner", new Class<?>[]{});
+        ((com.eurobuddha.comms.CommsScanner) ps.get(activity)).scan((int) tip + 1);
+        assertEquals("not counted twice", paid, db.order("ORD-SCAN").paidAmount);
+        // a coin that cannot be stored keeps the bookmark too
+        Queued q2 = new Queued(); set("io", q2);
+        db.setMeta("scanned_tip_pay_12121212", "1");
+        ScanQueue: {
+            Field pq = MainActivity.class.getDeclaredField("paymentQueue"); pq.setAccessible(true);
+            Object queue = pq.get(activity);
+            com.eurobuddha.comms.CommsScanner.Router r = (com.eurobuddha.comms.CommsScanner.Router) queue.getClass().getDeclaredMethod("route", com.eurobuddha.comms.CommsScanner.Router.class)
+                    .invoke(queue, (com.eurobuddha.comms.CommsScanner.Router) (cid, op, coin) -> { throw new IllegalStateException("disk full"); });
+            r.handle("0xE6", null, new JSONObject());
+            ((com.eurobuddha.comms.CommsScanner.MetaStore) queue).setMeta("scanned_tip_pay_12121212", "200");
+            q2.drain();
+            assertEquals("a failed coin keeps the bookmark", "1", db.getMeta("scanned_tip_pay_12121212", ""));
+        }
     }
 }
