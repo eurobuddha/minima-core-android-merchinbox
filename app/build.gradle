@@ -10,8 +10,8 @@ android {
         applicationId "com.eurobuddha.merchinbox"
         minSdk 28
         targetSdk 35
-        versionCode 534
-        versionName "0.5.34"
+        versionCode 535
+        versionName "0.5.35"
 
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
     }

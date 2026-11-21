@@ -884,6 +884,16 @@ public class MainActivity extends AppCompatActivity {
                     .setPositiveButton("It was not sent", (d, w) -> io.execute(() -> { DeliveryLedger.mark(db.getWritableDatabase(), ledgerKey(o.ref, line), DeliveryLedger.RELEASED); ui.post(() -> refreshOrderIfTopmost(o.ref)); }))
                     .setNegativeButton("Cancel", null).show());
             wrap.addView(rel);
+            TextView went = button("I checked: it WAS sent", false);
+            went.setOnClickListener(v -> new AlertDialog.Builder(this).setTitle("It was sent?")
+                    .setMessage("Only if your wallet's history shows the send of token\n" + tokenid + "\nto\n" + o.payaddr + "\nfor this order. The line is then marked sent and never sent again.")
+                    .setPositiveButton("It was sent", (d, w) -> io.execute(() -> {
+                        DeliveryLedger.mark(db.getWritableDatabase(), ledgerKey(o.ref, line), DeliveryLedger.SENT);
+                        db.setMeta("nftsent:" + key, "sent (checked by you)");
+                        ui.post(() -> refreshOrderIfTopmost(o.ref));
+                    }))
+                    .setNegativeButton("Cancel", null).show());
+            wrap.addView(went);
             return wrap;
         }
         TextView b = button(inFlight ? "Sending…" : "Send " + label + " to buyer", !inFlight);
@@ -1088,6 +1098,59 @@ public class MainActivity extends AppCompatActivity {
         final String tokenid = line[1], qty = line[2];
         if (!nftSending.add(key)) return;
         refreshOrderIfTopmost(o.ref);
+        // First a dry run, to learn the coins this send would spend (item 9): the first attempt's coins are kept, and a
+        // later attempt must spend at least one of them, so if the first one went after all, the two conflict.
+        final String dry;
+        try { dry = "send amount:" + qty + " address:" + o.payaddr + " tokenid:" + tokenid + " state:" + new JSONObject().put("1", "0x" + com.eurobuddha.comms.Hex.to(o.ref.getBytes(StandardCharsets.UTF_8))) + " dryrun:true"; }
+        catch (org.json.JSONException e) { io.execute(() -> DeliveryLedger.mark(db.getWritableDatabase(), ledgerKey(o.ref, line), DeliveryLedger.RELEASED)); deliverFailed(o, key, "the send could not be prepared", auto); return; }
+        node.cmd(dry, new NodeApi.Cb() {
+            @Override public void onResult(JSONObject r) {
+                final java.util.Set<String> inputs = dryRunInputs(r);
+                io.execute(() -> {
+                    String why = attemptCoins(key, inputs);
+                    ui.post(() -> {
+                        if (why != null) {   // nothing reached the node: the line is free again
+                            io.execute(() -> DeliveryLedger.mark(db.getWritableDatabase(), ledgerKey(o.ref, line), DeliveryLedger.RELEASED));
+                            deliverFailed(o, key, why, auto);
+                            return;
+                        }
+                        plainSend(o, line, key, auto);
+                    });
+                });
+            }
+            @Override public void onError(String m) {
+                io.execute(() -> DeliveryLedger.mark(db.getWritableDatabase(), ledgerKey(o.ref, line), DeliveryLedger.RELEASED));
+                ui.post(() -> deliverFailed(o, key, "the send could not be prepared: " + m, auto));
+            }
+        });
+    }
+
+    /** The input coin ids (lower case) of a send dry run, or empty when it gave none. */
+    static java.util.Set<String> dryRunInputs(JSONObject r) {
+        java.util.Set<String> out = new java.util.HashSet<>();
+        JSONObject resp = r == null || !r.optBoolean("status", false) ? null : r.optJSONObject("response");
+        JSONObject body = resp == null ? null : resp.optJSONObject("body");
+        JSONObject txn = body == null ? null : body.optJSONObject("txn");
+        JSONArray in = txn == null ? null : txn.optJSONArray("inputs");
+        for (int i = 0; in != null && i < in.length(); i++) { JSONObject c = in.optJSONObject(i); if (c != null && !c.optString("coinid").isEmpty()) out.add(c.optString("coinid").toLowerCase(java.util.Locale.ROOT)); }
+        return out;
+    }
+
+    /** Keeps the first attempt's input coins of a line; a later attempt must spend at least one of them. Returns why
+     *  not, or null. */
+    String attemptCoins(String key, java.util.Set<String> inputs) {
+        if (inputs.isEmpty()) return "the node did not say which coins this send would spend; nothing was sent";
+        java.util.Set<String> first = new java.util.HashSet<>();
+        try { JSONArray a = new JSONArray(db.getMeta("attemptcoins:" + key, "[]")); for (int i = 0; i < a.length(); i++) first.add(a.getString(i)); } catch (Exception ignored) {}
+        if (first.isEmpty()) { db.setMeta("attemptcoins:" + key, new JSONArray(inputs).toString()); return null; }
+        if (java.util.Collections.disjoint(first, inputs))
+            return "this send would not spend any coin of the first attempt for this line (" + String.join(", ", first)
+                    + "): if the first send went, say so (it WAS sent); nothing was sent";
+        return null;
+    }
+
+    private void plainSend(final MerchDb.Order o, final String[] line, final String key, final boolean auto) {
+        final String tokenid = line[1], qty = line[2];
         final boolean[] inCall = {true};
         CommsTransport.sendPayment(node, o.payaddr, qty, tokenid, o.ref, new CommsTransport.SendCb() {
             @Override public void onSent(final String txid) {

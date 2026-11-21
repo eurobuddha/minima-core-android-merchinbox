@@ -39,7 +39,8 @@ public class DrainTest {
     final Map<String, String> held = new HashMap<>();
     final List<JSONObject> payments = new ArrayList<>();
     final List<String> sends = new ArrayList<>(), coinReads = new ArrayList<>();
-    final java.util.Set<String> spent = new java.util.HashSet<>();   // coin ids (lower case) the vendor has since spent
+    final java.util.Set<String> spent = new java.util.HashSet<>();
+    String dryInput = "0x" + "98".repeat(32);   // the coin a send dry run says it would spend   // coin ids (lower case) the vendor has since spent
 
     /** Runs io work at once, so a test needs only the main looper. */
     static final class Inline extends AbstractExecutorService {
@@ -69,6 +70,8 @@ public class DrainTest {
                 for (JSONObject p : payments) if (id.equalsIgnoreCase(p.optString("coinid")) && !spent.contains(id.toLowerCase(java.util.Locale.ROOT))) a.put(p);
                 r.put("response", a);
             }
+            else if (c.endsWith(" dryrun:true")) r.put("response", new JSONObject().put("body", new JSONObject().put("txn", new JSONObject()
+                    .put("inputs", new JSONArray().put(new JSONObject().put("coinid", dryInput))))));   // a dry run: the coins it would spend, nothing sent
             else { if (c.contains("address:" + BUYER)) sends.add(c); r.put("response", new JSONObject().put("txpowid", "0x" + "77".repeat(32))); }
             cb.onResult(r);
             return null;
@@ -287,5 +290,21 @@ public class DrainTest {
         call("maybeAutoDeliver", new Class<?>[]{String.class}, "ORD-FAIL");
         ShadowLooper.idleMainLooper();
         assertEquals("notified once per line", 0, org.robolectric.Shadows.shadowOf(nm).size());
+    }
+
+    /** Point release item 9: a re-send after the vendor released an unfinished line must spend at least one coin of
+     *  the first attempt (so two transfers conflict); "it WAS sent" marks the line sent. */
+    @Test public void aReSendReusesTheFirstAttemptsCoinsAndItWasSentMarksTheLine() throws Exception {
+        MerchDb.Order o = order("ORD-PIN", "Art", ART, 1, "1");
+        pay("ORD-PIN", "1", tip - 5, "0xD1");
+        String[] line = lines(o).get(0);
+        String key = (String) call("lineKey", new Class<?>[]{String.class, String[].class}, "ORD-PIN", line);
+        db.setMeta("attemptcoins:" + key, new JSONArray().put("0x" + "97".repeat(32)).toString());   // the first attempt's coin
+        send(db.order("ORD-PIN"), false);
+        assertTrue("other coins: refused, nothing sent", sends.isEmpty());
+        assertEquals("the line is free again", DeliveryLedger.RELEASED, DeliveryLedger.state(db.getReadableDatabase(), MainActivity.ledgerKey("ORD-PIN", line)));
+        dryInput = "0x" + "97".repeat(32);
+        send(db.order("ORD-PIN"), false);
+        assertEquals("the first attempt's coin: sent", 1, sends.size());
     }
 }
