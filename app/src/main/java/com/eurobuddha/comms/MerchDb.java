@@ -275,6 +275,12 @@ public class MerchDb extends SQLiteOpenHelper implements CommsScanner.MetaStore 
         try { BigDecimal d = new BigDecimal(due(o)); full = d.signum() > 0 && new BigDecimal(o.paidAmount).compareTo(d) >= 0; }
         catch (Exception e) { full = false; }
         if (full == o.paid) return;
+        // An order counted by an Inbox before 0.5.30 kept no coin list (and before 0.5.11 an MxUSD payment kept the
+        // Minima backing it as its amount): one the vendor already advanced is not flipped back; the others say
+        // "upgraded: re-check payment" (point release item 12). A delivery still reads its coins back by id.
+        boolean legacy = getMeta("paidcoins:" + ref, "").isEmpty();
+        if (!full && legacy && (CONFIRMED.equals(o.status) || SHIPPED.equals(o.status) || DELIVERED.equals(o.status))) return;
+        if (!full && legacy && o.paid) setMeta("upgraded:" + ref, "1");
         ContentValues v = new ContentValues();
         v.put("paid", full ? 1 : 0);
         if (full && (PENDING.equals(o.status) || UNDERPAID.equals(o.status) || WRONG_TOKEN.equals(o.status))) v.put("status", PAID);

@@ -307,4 +307,25 @@ public class DrainTest {
         send(db.order("ORD-PIN"), false);
         assertEquals("the first attempt's coin: sent", 1, sends.size());
     }
+
+    /** Point release item 12: an order an older Inbox recorded (no coin list) that the vendor already advanced is not
+     *  flipped to UNDERPAID by a listing import; a merely paid one is, and says "upgraded"; and the old automatic
+     *  delivery setting shows a one-time notice. */
+    @Test public void olderOrdersAreNotFlippedWhenAdvancedAndTheOldAutoSettingIsAnnounced() throws Exception {
+        for (String[] r : new String[][]{{"ORD-OLDD", "DELIVERED"}, {"ORD-OLDP", "PAID"}}) {
+            order(r[0], "Piece", NFT, 1, "10");
+            db.getWritableDatabase().execSQL("UPDATE orders SET paid=1, status=?, paidamount='0.0001', paidtokenid='0x00' WHERE ref=?", new Object[]{r[1], r[0]});
+            db.setMeta("due:" + r[0], "10");
+            db.reevaluate(r[0]);
+        }
+        assertTrue("advanced: kept", db.order("ORD-OLDD").paid);
+        assertEquals(MerchDb.DELIVERED, db.order("ORD-OLDD").status);
+        assertFalse(db.order("ORD-OLDP").paid);
+        assertEquals("1", db.getMeta("upgraded:ORD-OLDP", ""));
+        assertFalse((Boolean) call("autoDeliverWasOn", new Class<?>[]{}));
+        db.setMeta("autodeliver", "1");
+        assertTrue((Boolean) call("autoDeliverWasOn", new Class<?>[]{}));
+        db.setMeta("autodeliverbanner", "1");
+        assertFalse((Boolean) call("autoDeliverWasOn", new Class<?>[]{}));
+    }
 }

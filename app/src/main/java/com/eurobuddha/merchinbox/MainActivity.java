@@ -445,6 +445,9 @@ public class MainActivity extends AppCompatActivity {
 
     /** Automatic delivery: OFF unless the vendor switches it on ("autosend"; the old "autodeliver" setting, ON by
      *  default before, is never read). Even ON, an order is sent only when every DeliveryRules check passes. */
+    /** The old "autodeliver" setting was on and the one-time notice was not dismissed yet (item 12). */
+    boolean autoDeliverWasOn() { return "1".equals(db.getMeta("autodeliver", "")) && db.getMeta("autodeliverbanner", "").isEmpty(); }
+
     private boolean autoDeliverOn() { return "1".equals(db.getMeta("autosend", "0")); }
 
     /** Auto-send every unsent NFT line of a cleanly-paid order. Idempotent: nftsent: meta skips
@@ -491,6 +494,12 @@ public class MainActivity extends AppCompatActivity {
         ver.setTextColor(Design.DIM2); ver.setTextSize(10f);
         ver.setPadding(dp(16), dp(2), dp(16), dp(4));
         col.addView(ver);
+        if (autoDeliverWasOn()) {   // once: the old setting was on, automatic delivery is now off until switched on
+            TextView ban = label("Automatic NFT delivery is now OFF after this update. Switch it on again with the \"Auto NFT delivery\" line below; it then sends only for orders that pass every check. (Tap to dismiss.)");
+            ban.setTextColor(Design.RED); ban.setPadding(dp(16), dp(4), dp(16), dp(4));
+            ban.setOnClickListener(v -> io.execute(() -> { db.setMeta("autodeliverbanner", "1"); ui.post(() -> refreshTop(buildOrders())); }));
+            col.addView(ban);
+        }
 
         TextView s = new TextView(this);
         s.setPadding(dp(16), dp(4), dp(16), dp(8)); s.setTextSize(12.5f);
@@ -683,6 +692,10 @@ public class MainActivity extends AppCompatActivity {
                         + "A payment counts only for the order whose secret it commits to; the other orders with this reference are listed below.");
                 cf.setTextColor(Design.RED); body.addView(cf);
             } else if (db.nonce(o).isEmpty()) body.addView(label("This order came from an older Shop without a payment secret: its payment is matched by its reference only."));
+            if ("1".equals(db.getMeta("upgraded:" + o.ref, ""))) {
+                TextView up = label("Upgraded: re-check this order's payment. It was recorded by an older Inbox, and nothing is sent until its coins are read back on chain.");
+                up.setTextColor(Design.RED); body.addView(up);
+            }
             if (listingFor(o.shopId) != null) body.addView(label(listingInUse(db.getMeta("listingsigned:" + o.shopId, ""))));
             String problems = db.listingProblems(o);
             TextView chk = label(!problems.isEmpty()
