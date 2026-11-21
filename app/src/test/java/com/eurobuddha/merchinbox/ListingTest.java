@@ -191,4 +191,15 @@ public class ListingTest {
     }
 
     static final String VENDOR_ADDR = "0x" + "12".repeat(32);
+
+    /** Point release item 10: NFTs only, "digital", and the listing has only postal delivery: no fee (the Shop
+     *  charges none), while a physical item still needs a listed method. */
+    @Test public void anAllNftDigitalOrderHasNoFeeWithoutADigitalRow() throws Exception {
+        JSONObject l = Listing.compact(new JSONObject(shop(ME, "Minima", null, "2.5")).put("shipping", new JSONArray()
+                .put(new JSONObject().put("id", "postal").put("label", "Postal").put("fee", "1.5"))).toString(), ME);
+        Listing.Check c = Listing.check(l, order("Minima", "digital", item("Piece", 1, "10", NFT)));
+        assertTrue(c.problems.toString(), c.problems.isEmpty());
+        assertEquals("10", c.due);
+        assertFalse(Listing.check(l, order("Minima", "digital", item("Print", 1, "2.5", null))).problems.isEmpty());
+    }
 }

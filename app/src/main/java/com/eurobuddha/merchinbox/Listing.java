@@ -228,6 +228,12 @@ final class Listing {
     }
 
     /** What an order is due by the listing, and every way it departs from it (empty = it matches). */
+    private static boolean allNft(JSONArray items) {
+        if (items == null || items.length() == 0) return false;
+        for (int i = 0; i < items.length(); i++) { JSONObject it = items.optJSONObject(i); if (it == null || it.optString("nftTokenId", "").isEmpty()) return false; }
+        return true;
+    }
+
     static Check check(JSONObject listing, MerchDb.Order o) {
         BigDecimal due = BigDecimal.ZERO;
         List<String> problems = new ArrayList<>();
@@ -279,6 +285,8 @@ final class Listing {
             if (s != null && s.optString("id").equals(o.shipping)) fee = new BigDecimal(s.optString("fee", "0"));
         }
         if (fee == null && (shipping == null || shipping.length() == 0) && (o.shipping == null || o.shipping.isEmpty() || "digital".equals(o.shipping))) fee = BigDecimal.ZERO;
+        // an order of NFTs only, delivered "digital", has no fee when the listing has no such row (the Shop charges none)
+        if (fee == null && "digital".equals(o.shipping) && allNft(items)) fee = BigDecimal.ZERO;
         if (fee == null) problems.add("the delivery method \"" + cap(o.shipping, 60) + "\" is not in your listing");
         else due = due.add(fee);
         Check c = new Check(due.toPlainString());
