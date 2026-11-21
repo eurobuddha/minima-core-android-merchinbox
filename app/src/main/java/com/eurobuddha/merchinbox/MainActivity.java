@@ -728,6 +728,18 @@ public class MainActivity extends AppCompatActivity {
     private void addContenders(LinearLayout body, final MerchDb.Order o) {
         JSONArray cs = db.contenders(o.ref);
         JSONArray un = db.unassignedCoins(o.ref);
+        if (db.conflict(o) && db.nonce(o).isEmpty() && o.paid && recordCameFirst(o)) {
+            body.addView(label("This order's own coin is in block " + db.getMeta("orderblock:" + o.ref, "") + ", before every payment counted for it, so it existed before its reference was public."));
+            TextView keep = button("Deliver to the order of record (" + o.payaddr + ")", false);
+            keep.setOnClickListener(v -> new AlertDialog.Builder(this).setTitle("Deliver to the order of record?")
+                    .setMessage("The other order with this reference arrived after this one's payment made the reference public. Nothing else changes: every other check still applies.")
+                    .setPositiveButton("Deliver to the order of record", (d, w) -> io.execute(() -> {
+                        if (db.conflict(o) && recordCameFirst(db.order(o.ref))) { db.setMeta("conflict:" + o.ref, ""); db.setMeta("conflictresolved:" + o.ref, "orderblock"); }
+                        ui.post(() -> refreshOrderIfTopmost(o.ref));
+                    }))
+                    .setNegativeButton("Cancel", null).show());
+            body.addView(keep);
+        }
         if (cs.length() == 0 && un.length() == 0 && !db.contendedCoinsFull(o.ref)) return;
         int committed = db.committedContender(o);
         if (db.contendedCoinsFull(o.ref)) { TextView t = label("More payments with this reference arrived than the Inbox keeps, so they could not all be read: no order can be switched here."); t.setTextColor(Design.RED); body.addView(t); }
@@ -1015,6 +1027,13 @@ public class MainActivity extends AppCompatActivity {
                 if (open) { final String ref = o.ref; ui.post(() -> settlePayments(ref, tip, ignored -> {})); }
             }
         });
+    }
+
+    /** recordCameFirst for a stored order, from its orderblock and the coins counted for it. */
+    boolean recordCameFirst(MerchDb.Order o) {
+        long ob;
+        try { ob = Long.parseLong(db.getMeta("orderblock:" + o.ref, "0")); } catch (NumberFormatException e) { ob = 0; }
+        return DeliveryRules.recordCameFirst(ob, paidCoins(o.ref), db.contendedCoins(o.ref).length() > 0);
     }
 
     /** The coins counted for an order: those MerchDb kept with their block, then older ones known only by their

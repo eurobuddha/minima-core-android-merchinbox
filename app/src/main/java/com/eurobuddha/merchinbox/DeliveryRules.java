@@ -114,6 +114,16 @@ final class DeliveryRules {
         return waiting;
     }
 
+    /** Point release item 6: an older-Shop order (no secret) flagged by a stranger's order with its copied ref may be
+     *  delivered to the order of record when the evidence says it came first: its order coin's block is earlier than
+     *  the block of every coin counted for it (so it existed before its ref was public), and no other order's coins
+     *  were recorded. Coins of unknown block give no evidence. */
+    static boolean recordCameFirst(long orderBlock, List<PaidCoin> paid, boolean contendedCoins) {
+        if (orderBlock <= 0 || contendedCoins || paid == null || paid.isEmpty()) return false;
+        for (PaidCoin c : paid) if (c.created <= 0 || c.created <= orderBlock) return false;
+        return true;
+    }
+
     static Verdict reasons(Inputs in) {
         Verdict v = new Verdict();
         MerchDb.Order o = in.order;
