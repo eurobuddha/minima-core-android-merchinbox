@@ -118,10 +118,15 @@ final class DeliveryRules {
     /** Point release item 6: an older-Shop order (no secret) flagged by a stranger's order with its copied ref may be
      *  delivered to the order of record when the evidence says it came first: its order coin's block is earlier than
      *  the block of every coin counted for it (so it existed before its ref was public), and no other order's coins
-     *  were recorded. Coins of unknown block give no evidence. */
-    static boolean recordCameFirst(long orderBlock, List<PaidCoin> paid, boolean contendedCoins) {
+     *  were recorded, and every other order with this ref has an order coin later than the earliest payment coin. Coins
+     *  and orders of unknown block give no evidence. */
+    static boolean recordCameFirst(long orderBlock, List<PaidCoin> paid, boolean contendedCoins, List<Long> contenderBlocks) {
         if (orderBlock <= 0 || contendedCoins || paid == null || paid.isEmpty()) return false;
-        for (PaidCoin c : paid) if (c.created <= 0 || c.created <= orderBlock) return false;
+        long earliest = Long.MAX_VALUE;
+        for (PaidCoin c : paid) { if (c.created <= 0 || c.created <= orderBlock) return false; earliest = Math.min(earliest, c.created); }
+        // m2: every other order with this ref came after the ref was public (its own order coin is later than the
+        // earliest payment); one of unknown block gives no evidence
+        for (Long b : contenderBlocks) if (b == null || b <= 0 || b <= earliest) return false;
         return true;
     }
 

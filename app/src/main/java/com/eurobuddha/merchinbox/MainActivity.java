@@ -348,6 +348,8 @@ public class MainActivity extends AppCompatActivity {
         if (MerchMessage.ORDER.equals(m.type)) {
             boolean fresh = db.upsertOrder(m, "seller", coinid);
             if (fresh && coin != null && coin.optLong("created", 0) > 0) db.setMeta("orderblock:" + m.ref, String.valueOf(coin.optLong("created")));   // bounds the payment read (L-a)
+            if (!fresh && coin != null && coin.optLong("created", 0) > 0 && coinid != null)   // another order with a stored ref: when it came (m2)
+                db.setMeta("contenderblock:" + m.ref + ":" + coinid.toLowerCase(java.util.Locale.ROOT), String.valueOf(coin.optLong("created")));
             if (fresh) recheck(db.order(m.ref));   // what is due, from the vendor's own listing
             return fresh;
         }
@@ -1264,7 +1266,13 @@ public class MainActivity extends AppCompatActivity {
     boolean recordCameFirst(MerchDb.Order o) {
         long ob;
         try { ob = Long.parseLong(db.getMeta("orderblock:" + o.ref, "0")); } catch (NumberFormatException e) { ob = 0; }
-        return DeliveryRules.recordCameFirst(ob, paidCoins(o.ref), db.contendedCoins(o.ref).length() > 0);
+        List<Long> blocks = new ArrayList<>();
+        JSONArray cs = db.contenders(o.ref);
+        for (int i = 0; i < cs.length(); i++) {
+            String b = db.getMeta("contenderblock:" + o.ref + ":" + cs.optJSONObject(i).optString("coinid").toLowerCase(java.util.Locale.ROOT), "");
+            try { blocks.add(Long.parseLong(b)); } catch (NumberFormatException e) { blocks.add(0L); }
+        }
+        return DeliveryRules.recordCameFirst(ob, paidCoins(o.ref), db.contendedCoins(o.ref).length() > 0, blocks);
     }
 
     /** The coins counted for an order: those MerchDb kept with their block, then older ones known only by their

@@ -183,13 +183,18 @@ public class Poc2Test extends DrainTest {
         payments.add(coin("0xE1", null));
         db.recordPayment(REF, "0xE1", "10", "0x00", null, tip - 5);
         assertTrue(db.order(REF).paid);
-        assertFalse(db.upsertOrder(msg("0xSTRANGER", STRANGER_ADDR, "", "Piece", "10"), "seller", "0xC2"));
+        MerchMessage st = msg("0xSTRANGER", STRANGER_ADDR, "", "Piece", "10");
+        call("routeIncoming", new Class<?>[]{String.class, Opened.class, JSONObject.class}, "0xC2", opened(st), new JSONObject().put("created", tip - 2));
         assertTrue(db.conflict(db.order(REF)));
         assertTrue((Boolean) call("recordCameFirst", new Class<?>[]{MerchDb.Order.class}, db.order(REF)));
-        assertFalse("a coin no later than the order: no evidence", DeliveryRules.recordCameFirst(tip - 5,
-                java.util.Collections.singletonList(new DeliveryRules.PaidCoin("0xe1", "10", "0x00", tip - 5)), false));
-        assertFalse("another order's coins recorded", DeliveryRules.recordCameFirst(tip - 8,
-                java.util.Collections.singletonList(new DeliveryRules.PaidCoin("0xe1", "10", "0x00", tip - 5)), true));
+        java.util.List<DeliveryRules.PaidCoin> paid = java.util.Collections.singletonList(new DeliveryRules.PaidCoin("0xe1", "10", "0x00", tip - 5));
+        assertFalse("a coin no later than the order: no evidence", DeliveryRules.recordCameFirst(tip - 5, paid, false, java.util.Collections.singletonList(tip - 2)));
+        assertFalse("another order's coins recorded", DeliveryRules.recordCameFirst(tip - 8, paid, true, java.util.Collections.singletonList(tip - 2)));
+        // m2: a contender whose own order coin is not later than the earliest payment, or of unknown block: no action
+        assertFalse(DeliveryRules.recordCameFirst(tip - 8, paid, false, java.util.Collections.singletonList(tip - 6)));
+        assertFalse(DeliveryRules.recordCameFirst(tip - 8, paid, false, java.util.Collections.singletonList(0L)));
+        db.setMeta("contenderblock:" + REF + ":0xc2", String.valueOf(tip - 6));
+        assertFalse("the stranger's order came before the payment", (Boolean) call("recordCameFirst", new Class<?>[]{MerchDb.Order.class}, db.order(REF)));
         db.setMeta("conflict:" + REF, "");   // the vendor's action
         send(db.order(REF), false);
         assertEquals(1, sends.size());
