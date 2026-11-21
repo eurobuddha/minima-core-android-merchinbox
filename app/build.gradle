@@ -10,8 +10,8 @@ android {
         applicationId "com.eurobuddha.merchinbox"
         minSdk 28
         targetSdk 35
-        versionCode 529
-        versionName "0.5.29"
+        versionCode 530
+        versionName "0.5.30"
 
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
     }
@@ -41,7 +41,7 @@ android {
             signingConfig signingConfigs.release
         }
     }
-    testOptions { unitTests.includeAndroidResources = true; unitTests.returnDefaultValues = true }
+    testOptions { unitTests.includeAndroidResources = true; unitTests.returnDefaultValues = true; unitTests.all { maxHeapSize = '4g' } }   // the ordering regression runs 480 Robolectric scenarios
     compileOptions {
         sourceCompatibility JavaVersion.VERSION_11
         targetCompatibility JavaVersion.VERSION_11

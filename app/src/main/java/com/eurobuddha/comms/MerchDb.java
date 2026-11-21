@@ -129,7 +129,7 @@ public class MerchDb extends SQLiteOpenHelper implements CommsScanner.MetaStore 
                         ContentValues f = new ContentValues(); f.put("k", "conflict:" + m.ref); f.put("v", "1");
                         db.insertWithOnConflict(META, null, f, SQLiteDatabase.CONFLICT_REPLACE);
                     }
-                    if (oldNonce.isEmpty() || secret) addContender(db, m.ref, contender(m, coinid, secret ? m.nonce : ""));
+                    addContender(db, m.ref, contender(m, coinid, secret ? m.nonce : ""));   // shown to the vendor (L-B)
                 }
             }
             db.setTransactionSuccessful();
@@ -195,8 +195,10 @@ public class MerchDb extends SQLiteOpenHelper implements CommsScanner.MetaStore 
         // the ref and counts nothing; the vendor then sees both and may make that order the order of record.
         boolean mine = n.isEmpty() ? cc.isEmpty() : MerchMessage.commitment(n).equalsIgnoreCase(cc);
         if (!mine) {
-            if (!cc.isEmpty() && !getMeta("othercommit:" + ref + ":" + cc.toLowerCase(java.util.Locale.ROOT), "").isEmpty())
-                contendedPayment(ref, coinid, paidAmount, paidTokenid, cc);
+            if (!cc.isEmpty() && (!getMeta("othercommit:" + ref + ":" + cc.toLowerCase(java.util.Locale.ROOT), "").isEmpty()
+                    || "1".equals(getMeta("conflictoverflow:" + ref, ""))))
+                contendedPayment(o, coinid, paidAmount, paidTokenid, cc);
+            else if (cc.isEmpty() && !n.isEmpty()) unassignedPayment(ref, coinid, paidAmount, paidTokenid);   // L-B
             return null;
         }
         String want = MerchMessage.tokenFor(o.currency);
@@ -226,6 +228,15 @@ public class MerchDb extends SQLiteOpenHelper implements CommsScanner.MetaStore 
             ContentValues m = new ContentValues(); m.put("k", counted); m.put("v", ref);
             db.insertWithOnConflict(META, null, m, SQLiteDatabase.CONFLICT_REPLACE);
             if (v.size() > 0) db.update(ORD, v, "ref=?", new String[]{ref});
+            // the coins counted for the order of record, so they move with it on a switch (L-C)
+            org.json.JSONArray pc = coinList("paidcoins:" + ref);
+            try { pc.put(new org.json.JSONObject().put("coinid", coinid).put("amount", nz(paidAmount)).put("tokenid", nz(paidTokenid)).put("commitment", cc.toLowerCase(java.util.Locale.ROOT))); }
+            catch (org.json.JSONException ignored) {}
+            ContentValues pm = new ContentValues(); pm.put("k", "paidcoins:" + ref); pm.put("v", pc.toString());
+            db.insertWithOnConflict(META, null, pm, SQLiteDatabase.CONFLICT_REPLACE);
+            // An order with a secret, paid in full by its own commitment, is the buyer's who holds that secret: a
+            // flag raised by another kept order's coins no longer holds it back (those coins stay recorded).
+            if (PAID.equals(result) && !n.isEmpty()) db.delete(META, "k=?", new String[]{"conflict:" + ref});
             db.setTransactionSuccessful();
         } finally { db.endTransaction(); }
         return result;
@@ -258,7 +269,12 @@ public class MerchDb extends SQLiteOpenHelper implements CommsScanner.MetaStore 
     public boolean conflict(Order o) { return o != null && "1".equals(getMeta("conflict:" + o.ref, "")); }
 
     /** At most this many other orders are kept beside one ref; later ones are dropped (the ref stays as it is). */
-    public static final int MAX_CONTENDERS = 8, MAX_CONTENDED_COINS = 32;
+    public static final int MAX_CONTENDERS = 8, MAX_CONTENDED_COINS = 32, MAX_OTHER_COMMITS = 64;
+
+    /** A kept order's due, recomputed from the vendor's listing (the Inbox sets this); null when it cannot be, and with
+     *  no hook the order's own stated amount. */
+    public interface Dues { String due(String ref, org.json.JSONObject contender); }
+    public volatile Dues dues;
 
     private static org.json.JSONObject contender(MerchMessage m, String coinid, String nonce) {
         org.json.JSONObject c = new org.json.JSONObject();
@@ -274,20 +290,49 @@ public class MerchDb extends SQLiteOpenHelper implements CommsScanner.MetaStore 
 
     private void addContender(SQLiteDatabase db, String ref, org.json.JSONObject c) {
         org.json.JSONArray a = contenders(ref);
-        if (a.length() >= MAX_CONTENDERS) return;
         for (int i = 0; i < a.length(); i++) {
             org.json.JSONObject x = a.optJSONObject(i);
             if (x != null && x.optString("from").equals(c.optString("from")) && x.optString("items").equals(c.optString("items"))
                     && x.optString("payaddr").equals(c.optString("payaddr")) && x.optString("nonce").equals(c.optString("nonce"))) return;
         }
-        a.put(c);
-        ContentValues f = new ContentValues(); f.put("k", "conflictorder:" + ref); f.put("v", a.toString());
-        db.insertWithOnConflict(META, null, f, SQLiteDatabase.CONFLICT_REPLACE);
-        if (!c.optString("commitment").isEmpty()) {
-            ContentValues g = new ContentValues(); g.put("k", "othercommit:" + ref + ":" + c.optString("commitment").toLowerCase(java.util.Locale.ROOT)); g.put("v", "1");
-            db.insertWithOnConflict(META, null, g, SQLiteDatabase.CONFLICT_REPLACE);
+        if (a.length() < MAX_CONTENDERS) {   // past 8 kept orders only the commitment is kept (L-A)
+            a.put(c);
+            ContentValues f = new ContentValues(); f.put("k", "conflictorder:" + ref); f.put("v", a.toString());
+            db.insertWithOnConflict(META, null, f, SQLiteDatabase.CONFLICT_REPLACE);
         }
+        otherCommit(db, ref, c.optString("commitment"));
     }
+
+    /** Remember a kept order's commitment (its own cap, 64); past it, an overflow mark makes any commitment not of the
+     *  order of record count as another order's (L-A). */
+    private void otherCommit(SQLiteDatabase db, String ref, String commitment) {
+        if (commitment.isEmpty()) return;
+        long n;
+        try (Cursor q = db.rawQuery("SELECT COUNT(*) FROM " + META + " WHERE k LIKE ?", new String[]{"othercommit:" + ref + ":%"})) { n = q.moveToFirst() ? q.getLong(0) : 0; }
+        ContentValues g = new ContentValues();
+        if (n < MAX_OTHER_COMMITS) { g.put("k", "othercommit:" + ref + ":" + commitment.toLowerCase(java.util.Locale.ROOT)); g.put("v", "1"); }
+        else { g.put("k", "conflictoverflow:" + ref); g.put("v", "1"); }
+        db.insertWithOnConflict(META, null, g, SQLiteDatabase.CONFLICT_REPLACE);
+    }
+
+    private org.json.JSONArray coinList(String key) {
+        try { return new org.json.JSONArray(getMeta(key, "[]")); } catch (Exception e) { return new org.json.JSONArray(); }
+    }
+
+    /** Coins with this ref and no commitment, at the vendor address, while the order of record has a secret (L-B):
+     *  counted for nothing, shown to the vendor. */
+    public org.json.JSONArray unassignedCoins(String ref) { return coinList("unassigned:" + ref); }
+
+    private void unassignedPayment(String ref, String coinid, String amount, String tokenid) {
+        org.json.JSONArray a = unassignedCoins(ref);
+        if (a.length() >= MAX_CONTENDED_COINS) { setMeta("unassignedfull:" + ref, "1"); return; }
+        for (int i = 0; i < a.length(); i++) { org.json.JSONObject x = a.optJSONObject(i); if (x != null && coinid.equalsIgnoreCase(x.optString("coinid"))) return; }
+        try { a.put(new org.json.JSONObject().put("coinid", coinid).put("amount", nz(amount)).put("tokenid", nz(tokenid))); } catch (org.json.JSONException ignored) {}
+        setMeta("unassigned:" + ref, a.toString());
+    }
+
+    /** More coins with this ref arrived than can be kept: no switch is offered and the screen says so (L-A). */
+    public boolean contendedCoinsFull(String ref) { return "1".equals(getMeta("conflictpaidfull:" + ref, "")) || "1".equals(getMeta("unassignedfull:" + ref, "")); }
 
     /** The other orders that arrived with this ref, kept for the vendor to see (sender, buyer address, items whole). */
     public org.json.JSONArray contenders(String ref) {
@@ -299,28 +344,54 @@ public class MerchDb extends SQLiteOpenHelper implements CommsScanner.MetaStore 
         try { return new org.json.JSONArray(getMeta("conflictpaid:" + ref, "[]")); } catch (Exception e) { return new org.json.JSONArray(); }
     }
 
-    private void contendedPayment(String ref, String coinid, String amount, String tokenid, String commitment) {
+    /** A coin committing to another order kept with this ref (or to one past the caps): recorded, counted for nothing.
+     *  The ref is flagged when the order of record has no secret (as before), when the commitment is of no kept order,
+     *  or when that kept order's coins together reach its own due (from the listing where there is one): a stranger's
+     *  tiny coin no longer holds back the order of record (final check M-A). */
+    private void contendedPayment(Order o, String coinid, String amount, String tokenid, String commitment) {
+        String ref = o.ref, lc = commitment.toLowerCase(java.util.Locale.ROOT);
         org.json.JSONArray a = contendedCoins(ref);
         for (int i = 0; i < a.length(); i++) { org.json.JSONObject x = a.optJSONObject(i); if (x != null && coinid.equalsIgnoreCase(x.optString("coinid"))) return; }
+        boolean full = a.length() >= MAX_CONTENDED_COINS;
+        if (!full) {
+            try { a.put(new org.json.JSONObject().put("coinid", coinid).put("amount", nz(amount)).put("tokenid", nz(tokenid)).put("commitment", lc)); }
+            catch (org.json.JSONException ignored) {}
+        }
+        org.json.JSONObject owner = null;
+        org.json.JSONArray cs = contenders(ref);
+        for (int i = 0; i < cs.length(); i++) if (lc.equalsIgnoreCase(cs.optJSONObject(i).optString("commitment"))) owner = cs.optJSONObject(i);
+        boolean flag = nonce(o).isEmpty() || (owner == null && !full) || (owner != null && paidInFull(ref, owner, a));
         SQLiteDatabase db = getWritableDatabase();
         db.beginTransaction();
         try {
-            ContentValues f = new ContentValues(); f.put("k", "conflict:" + ref); f.put("v", "1");
-            db.insertWithOnConflict(META, null, f, SQLiteDatabase.CONFLICT_REPLACE);
-            if (a.length() < MAX_CONTENDED_COINS) {
-                try { a.put(new org.json.JSONObject().put("coinid", coinid).put("amount", nz(amount)).put("tokenid", nz(tokenid)).put("commitment", commitment.toLowerCase(java.util.Locale.ROOT))); }
-                catch (org.json.JSONException ignored) {}
-                ContentValues g = new ContentValues(); g.put("k", "conflictpaid:" + ref); g.put("v", a.toString());
-                db.insertWithOnConflict(META, null, g, SQLiteDatabase.CONFLICT_REPLACE);
-            }
+            if (flag) { ContentValues f = new ContentValues(); f.put("k", "conflict:" + ref); f.put("v", "1"); db.insertWithOnConflict(META, null, f, SQLiteDatabase.CONFLICT_REPLACE); }
+            ContentValues g = new ContentValues();
+            if (full) { g.put("k", "conflictpaidfull:" + ref); g.put("v", "1"); }
+            else { g.put("k", "conflictpaid:" + ref); g.put("v", a.toString()); }
+            db.insertWithOnConflict(META, null, g, SQLiteDatabase.CONFLICT_REPLACE);
             db.setTransactionSuccessful();
         } finally { db.endTransaction(); }
+    }
+
+    /** True when the coins committing to this kept order, in its currency's token, reach its due (above zero). */
+    private boolean paidInFull(String ref, org.json.JSONObject owner, org.json.JSONArray coins) {
+        String due;
+        try { due = dues == null ? owner.optString("amount") : dues.due(ref, owner); } catch (RuntimeException e) { due = null; }
+        String want = MerchMessage.tokenFor(owner.optString("currency"));
+        if (due == null || want == null) return false;
+        BigDecimal sum = BigDecimal.ZERO;
+        for (int i = 0; i < coins.length(); i++) {
+            org.json.JSONObject x = coins.optJSONObject(i);
+            if (x == null || !owner.optString("commitment").equalsIgnoreCase(x.optString("commitment")) || !want.equalsIgnoreCase(x.optString("tokenid"))) continue;
+            try { sum = sum.add(new BigDecimal(x.optString("amount"))); } catch (NumberFormatException ignored) {}
+        }
+        try { BigDecimal d = new BigDecimal(due); return d.signum() > 0 && sum.compareTo(d) >= 0; } catch (NumberFormatException e) { return false; }
     }
 
     /** The one order kept beside this ref that every contended coin commits to, or -1 (none, or coins for several):
      *  the only order the vendor may make the order of record, and only while the order of record is unpaid. */
     public int committedContender(Order o) {
-        if (o == null || o.paid) return -1;
+        if (o == null || o.paid || contendedCoinsFull(o.ref)) return -1;
         // never once anything was sent or reserved for this ref (a line delivered against the order of record)
         try (Cursor q = getReadableDatabase().rawQuery("SELECT 1 FROM " + META + " WHERE k LIKE ? OR k LIKE ? LIMIT 1",
                 new String[]{"nftsent:" + o.ref + ":%", "ledger:" + o.ref + "|%"})) { if (q.moveToFirst()) return -1; }
@@ -337,27 +408,39 @@ public class MerchDb extends SQLiteOpenHelper implements CommsScanner.MetaStore 
     }
 
     /** Make the order the payments commit to the order of record (the vendor's action; no free choice): the stored
-     *  order is kept beside the ref instead, the payment counters start again, the flag is cleared, and the
-     *  contended coins are counted for the new order of record. The caller rechecks it against the listing. */
+     *  order is kept beside the ref instead, with the coins counted for it (their markers removed, so a switch back
+     *  counts them again: L-C), the flag is cleared, and the new order's coins (contended, or counted for it before)
+     *  are counted for it. The check runs inside the write transaction (L-C). The caller rechecks it against the listing. */
     public boolean switchToCommitted(String ref) {
-        Order o = order(ref);
-        int i = committedContender(o);
-        if (i < 0) return false;
-        org.json.JSONObject c = contenders(ref).optJSONObject(i);
-        MerchMessage was = new MerchMessage();
-        was.ref = ref; was.from = o.counterparty; was.fromname = o.counterpartyname; was.buyerPayaddr = o.payaddr; was.items = o.items;
-        was.product = o.product; was.amount = o.amount; was.currency = o.currency; was.tokenid = o.tokenid; was.shipping = o.shipping;
-        was.delivery = o.delivery; was.message = o.message; was.shopId = o.shopId; was.shopName = o.shopName; was.date = o.date;
-        String oldNonce = nonce(o);
         SQLiteDatabase db = getWritableDatabase();
+        org.json.JSONArray replay = new org.json.JSONArray();
         db.beginTransaction();
         try {
-            org.json.JSONArray rest = new org.json.JSONArray(), cs = contenders(ref);
+            Order o = order(ref);
+            int i = committedContender(o);
+            if (i < 0) return false;
+            org.json.JSONArray cs = contenders(ref);
+            org.json.JSONObject c = cs.optJSONObject(i);
+            MerchMessage was = new MerchMessage();
+            was.ref = ref; was.from = o.counterparty; was.fromname = o.counterpartyname; was.buyerPayaddr = o.payaddr; was.items = o.items;
+            was.product = o.product; was.amount = o.amount; was.currency = o.currency; was.tokenid = o.tokenid; was.shipping = o.shipping;
+            was.delivery = o.delivery; was.message = o.message; was.shopId = o.shopId; was.shopName = o.shopName; was.date = o.date;
+            org.json.JSONObject wasEntry = contender(was, o.coinid, nonce(o));
+            org.json.JSONArray counted = coinList("paidcoins:" + ref);
+            for (int k = 0; k < counted.length(); k++) {
+                org.json.JSONObject x = counted.optJSONObject(k);
+                if (x != null) db.delete(META, "k=?", new String[]{"paycoin:" + x.optString("coinid").toLowerCase(java.util.Locale.ROOT)});
+            }
+            try { wasEntry.put("coins", counted); } catch (org.json.JSONException ignored) {}
+            org.json.JSONArray theirs = c.optJSONArray("coins"), contended = contendedCoins(ref);
+            for (int k = 0; theirs != null && k < theirs.length(); k++) replay.put(theirs.opt(k));
+            for (int k = 0; k < contended.length(); k++) replay.put(contended.opt(k));
+            org.json.JSONArray rest = new org.json.JSONArray();
             for (int k = 0; k < cs.length(); k++) if (k != i) rest.put(cs.opt(k));
             ContentValues f = new ContentValues(); f.put("k", "conflictorder:" + ref); f.put("v", rest.toString());
             db.insertWithOnConflict(META, null, f, SQLiteDatabase.CONFLICT_REPLACE);
             db.delete(META, "k=?", new String[]{"othercommit:" + ref + ":" + c.optString("commitment").toLowerCase(java.util.Locale.ROOT)});
-            addContender(db, ref, contender(was, o.coinid, oldNonce));
+            addContender(db, ref, wasEntry);
             ContentValues v = new ContentValues();
             String want = MerchMessage.tokenFor(c.optString("currency"));
             v.put("counterparty", c.optString("from")); v.put("counterpartyname", c.optString("fromname")); v.put("payaddr", c.optString("payaddr"));
@@ -373,13 +456,13 @@ public class MerchDb extends SQLiteOpenHelper implements CommsScanner.MetaStore 
                 ContentValues mm = new ContentValues(); mm.put("k", "mismatch:" + ref); mm.put("v", "1");
                 db.insertWithOnConflict(META, null, mm, SQLiteDatabase.CONFLICT_REPLACE);
             } else db.delete(META, "k=?", new String[]{"mismatch:" + ref});
-            for (String k : new String[]{"conflict:", "due:", "listingproblem:"}) db.delete(META, "k=?", new String[]{k + ref});
+            for (String k : new String[]{"conflict:", "due:", "listingproblem:", "paidcoins:"}) db.delete(META, "k=?", new String[]{k + ref});
+            ContentValues z = new ContentValues(); z.put("k", "conflictpaid:" + ref); z.put("v", "[]");
+            db.insertWithOnConflict(META, null, z, SQLiteDatabase.CONFLICT_REPLACE);
             db.setTransactionSuccessful();
         } finally { db.endTransaction(); }
-        org.json.JSONArray coins = contendedCoins(ref);
-        setMeta("conflictpaid:" + ref, "[]");
-        for (int k = 0; k < coins.length(); k++) {
-            org.json.JSONObject x = coins.optJSONObject(k);
+        for (int k = 0; k < replay.length(); k++) {
+            org.json.JSONObject x = replay.optJSONObject(k);
             if (x != null) recordPayment(ref, x.optString("coinid"), x.optString("amount"), x.optString("tokenid"), x.optString("commitment"));
         }
         return true;

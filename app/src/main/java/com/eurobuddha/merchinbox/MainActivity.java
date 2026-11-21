@@ -333,6 +333,7 @@ public class MainActivity extends AppCompatActivity {
         if (!MerchMessage.validRef(ref)) return false;
         MerchDb.Order o = db.order(ref);
         if (o == null || o.paid) return false;   // PAID locks; any other coin is counted once (recordPayment keeps its id)
+        db.dues = this::contenderDue;   // another kept order's coins flag the ref only once they reach its listed due (M-A)
         String amount = MerchDb.coinAmount(coin);   // a token coin's tokenamount, never the Minima amount backing it
         String tokenid = coin.optString("tokenid", "0x00");
         String result = db.recordPayment(ref, coinid, amount, tokenid, CommsScanner.statePort(coin, 2));   // each coin counted once; port 2 = the order secret's commitment (H1)
@@ -406,6 +407,17 @@ public class MainActivity extends AppCompatActivity {
     }
 
     /** Recompute what an order is due from the vendor's own listing for its shop, if one was imported. */
+    /** What another order kept with a ref is due, from the vendor's listing for its shop (null when it departs from the
+     *  listing: it never counts as paid), else its own stated amount (no listing: nothing can be sent anyway). */
+    private String contenderDue(String ref, JSONObject c) {
+        MerchDb.Order x = new MerchDb.Order();
+        x.ref = ref; x.role = "seller"; x.shopId = c.optString("shopId"); x.currency = c.optString("currency"); x.shipping = c.optString("shipping");
+        x.items = c.optString("items"); x.product = c.optString("product"); x.amount = c.optString("amount");
+        JSONObject listing = listingFor(x.shopId);
+        if (listing == null) return x.amount;
+        try { Listing.Check k = Listing.check(listing, x); return k.problems.isEmpty() ? k.due : null; } catch (Throwable e) { return null; }
+    }
+
     private void recheck(MerchDb.Order o) {
         if (o == null || !"seller".equals(o.role)) return;
         String raw = db.getMeta("listing:" + o.shopId, "");
@@ -710,8 +722,15 @@ public class MainActivity extends AppCompatActivity {
      *  a payment commits to, and the one action the vendor has: make THAT order the order of record. */
     private void addContenders(LinearLayout body, final MerchDb.Order o) {
         JSONArray cs = db.contenders(o.ref);
-        if (cs.length() == 0) return;
+        JSONArray un = db.unassignedCoins(o.ref);
+        if (cs.length() == 0 && un.length() == 0 && !db.contendedCoinsFull(o.ref)) return;
         int committed = db.committedContender(o);
+        if (db.contendedCoinsFull(o.ref)) { TextView t = label("More payments with this reference arrived than the Inbox keeps, so they could not all be read: no order can be switched here."); t.setTextColor(Design.RED); body.addView(t); }
+        for (int i = 0; i < un.length(); i++) {
+            JSONObject u = un.optJSONObject(i); if (u == null) continue;
+            body.addView(label("A payment with this reference and no payment secret, counted for no order: coin " + u.optString("coinid") + ", " + u.optString("amount") + " of token " + u.optString("tokenid") + "."));
+        }
+        if (cs.length() == 0) return;
         body.addView(sectionLabel("Other orders with this reference"));
         for (int i = 0; i < cs.length(); i++) {
             JSONObject c = cs.optJSONObject(i); if (c == null) continue;
@@ -724,6 +743,7 @@ public class MainActivity extends AppCompatActivity {
         if (committed >= 0) {
             TextView b = button("Make the order the payment commits to the order of record", false);
             b.setOnClickListener(v -> io.execute(() -> {
+                db.dues = this::contenderDue;
                 if (db.switchToCommitted(o.ref)) recheck(db.order(o.ref));
                 ui.post(() -> refreshOrderIfTopmost(o.ref));
             }));

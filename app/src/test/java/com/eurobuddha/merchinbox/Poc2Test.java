@@ -38,7 +38,7 @@ public class Poc2Test extends DrainTest {
         payments.add(coin("0xE1", c));
         assertFalse(db.upsertOrder(msg("0xSTRANGER", STRANGER_ADDR, "", "Art", "1"), "seller", "0xC2"));
         assertFalse("no flag from a stranger", db.conflict(db.order(REF)));
-        assertEquals("ignored, not kept", 0, db.contenders(REF).length());
+        assertEquals("kept beside it for the vendor to see, with no commitment (L-B)", "", db.contenders(REF).getJSONObject(0).getString("commitment"));
         send(db.order(REF), false);
         assertEquals(1, sends.size());
     }
@@ -152,5 +152,26 @@ public class Poc2Test extends DrainTest {
         assertEquals("", DeliveryRules.text("0x" + hex(REF) + "ff"));
         assertEquals("", DeliveryRules.text("0xzz"));
         assertEquals(REF, DeliveryRules.text("0x" + hex(REF)));
+    }
+
+    /** L-C: the coins counted for an order move with it on a switch, so switching back counts them again. */
+    @Test public void switchingBackCountsTheEarlierCoinsAgain() throws Exception {
+        String n = MerchMessage.newNonce(), c = MerchMessage.commitment(n), s = MerchMessage.newNonce(), sc = MerchMessage.commitment(s);
+        assertTrue(db.upsertOrder(msg("0xBUYER", BUYER, n, "Piece", "10"), "seller", "0xC1"));
+        recheck();
+        assertEquals(MerchDb.UNDERPAID, db.recordPayment(REF, "0xA1", "5", "0x00", c));
+        db.upsertOrder(msg("0xSTRANGER", STRANGER_ADDR, s, "Piece", "10"), "seller", "0xC2");
+        assertNull(db.recordPayment(REF, "0xA2", "1", "0x00", sc));
+        assertFalse("a tiny coin for another order no longer flags (M-A)", db.conflict(db.order(REF)));
+        assertTrue(db.switchToCommitted(REF));
+        recheck();
+        assertEquals("0xSTRANGER", db.order(REF).counterparty);
+        assertNull(db.recordPayment(REF, "0xA3", "5", "0x00", c));   // the honest buyer pays the rest
+        assertTrue(db.switchToCommitted(REF));
+        recheck();
+        MerchDb.Order o = db.order(REF);
+        assertEquals("0xBUYER", o.counterparty);
+        assertTrue("5 counted before the first switch + 5 after", o.paid);
+        assertEquals(0, new java.math.BigDecimal("10").compareTo(new java.math.BigDecimal(o.paidAmount)));
     }
 }
