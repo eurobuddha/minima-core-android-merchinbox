@@ -227,7 +227,9 @@ public class MainActivity extends AppCompatActivity {
         node.cmd("block", new NodeApi.Cb() {
             @Override public void onResult(JSONObject j) {
                 JSONObject r = j.optJSONObject("response");
+                int was = chainBlock;
                 if (r != null) try { chainBlock = Integer.parseInt(r.optString("block", "0")); } catch (Exception ignored) {}
+                if (chainBlock > was) confirmSweep(chainBlock);   // once per new block
             }
             @Override public void onError(String m) {}
         });
@@ -336,7 +338,7 @@ public class MainActivity extends AppCompatActivity {
         db.dues = this::contenderDue;   // another kept order's coins flag the ref only once they reach its listed due (M-A)
         String amount = MerchDb.coinAmount(coin);   // a token coin's tokenamount, never the Minima amount backing it
         String tokenid = coin.optString("tokenid", "0x00");
-        String result = db.recordPayment(ref, coinid, amount, tokenid, CommsScanner.statePort(coin, 2));   // each coin counted once; port 2 = the order secret's commitment (H1)
+        String result = db.recordPayment(ref, coinid, amount, tokenid, CommsScanner.statePort(coin, 2), coin.optLong("created", 0));   // each coin counted once; port 2 = the order secret's commitment (H1)
         // Auto-deliver only on a clean PAID (the token received is the order currency's) — never
         // UNDERPAID/WRONG_TOKEN, and nothing is sent for a mismatched order (MerchDb.mismatch). Queued, drained at scan end.
         if (MerchDb.PAID.equals(result)) pendingAutoDeliver.add(ref);
@@ -908,9 +910,17 @@ public class MainActivity extends AppCompatActivity {
         });
         wrap.addView(b);
         wrap.addView(why);
-        checkDelivery(o.ref, line, verdict -> why.setText(verdict.reasons.isEmpty() ? "Every check passes: ready to send."
-                : "Waiting, nothing is sent until:\n• " + String.join("\n• ", verdict.reasons)));
+        why.setText(storedVerdict(key));   // the last check's verdict: a check runs only on Send or the automatic attempt
         return wrap;
+    }
+
+    /** The verdict of the last check of this line, as stored by checkDelivery. */
+    String storedVerdict(String key) {
+        String at = db.getMeta("verdictat:" + key, "");
+        if (at.isEmpty()) return "Not checked yet: tap Send to check this line (nothing is sent unless every check passes).";
+        String v = db.getMeta("verdict:" + key, "");
+        return v.isEmpty() ? "Every check passed at block " + at + ": ready to send."
+                : "At block " + at + ", nothing could be sent until:\n• " + v.replace("\n", "\n• ");
     }
 
     /** Deliver one order line. StateNFT pieces (stateIdx ≥ 1) transfer the exact coin with its state
@@ -944,29 +954,13 @@ public class MainActivity extends AppCompatActivity {
         catch (NumberFormatException e) { return 0; }
     }
 
-    /** The read of an order's payment coins (delta review L-a): the currency's token at the vendor address, and only
-     *  as deep as the order: from the block its order coin was created at, else from its date at 2 x the 50 s block
-     *  time plus 100 blocks (a payment never predates its order). Unspent coins older than the node's tree sit in
-     *  its root node, at the far end of that depth, so they are still in the reply. With no chain height there is
-     *  no read at all (null): the delivery is refused for want of it. */
-    static String paymentRead(String vendorAddr, String payToken, long tip, long orderBlock, long orderDate, long now) {
-        if (tip <= 0) return null;
-        String cmd = "coins relevant:true address:" + vendorAddr + " tokenid:" + payToken;
-        long depth = orderBlock > 0 && orderBlock <= tip ? tip - orderBlock + 2 : Math.max(0, now - orderDate) / 25_000L + 100;
-        return cmd + " depth:" + Math.max(1, Math.min(depth, tip + 1));
-    }
-
     /** Every rule of DeliveryRules, from fresh reads: the chain tip, the token, the vendor's holdings, the
      *  payment coins at the vendor's own address, and (on the io thread) the order, its listing and the ledger. */
     private void checkDelivery(final String ref, final String[] line, final java.util.function.Consumer<DeliveryRules.Verdict> then) {
         final String tokenid = line[1];
         final boolean askToken = DeliveryGuard.basic(tokenid) == null;
-        MerchDb.Order pre = db.order(ref);
-        final String payToken = pre == null ? null : MerchMessage.tokenFor(pre.currency);   // only the currency's coins are read (M3)
-        long ob; try { ob = Long.parseLong(db.getMeta("orderblock:" + ref, "0")); } catch (NumberFormatException e) { ob = 0; }
-        final long orderBlock = ob, orderDate = pre == null ? 0 : pre.date;
         ask("block", b -> ask(askToken ? "tokens tokenid:" + tokenid : null, t -> ask(askToken ? "coins relevant:true tokenid:" + tokenid : null, h ->
-                ask(Util.isValidAddress(vendorAddr) && payToken != null ? paymentRead(vendorAddr, payToken, tipOf(b), orderBlock, orderDate, System.currentTimeMillis()) : null, pay -> io.execute(() -> {
+                settlePayments(ref, tipOf(b), paid -> io.execute(() -> {
             DeliveryRules.Inputs in = new DeliveryRules.Inputs();
             in.order = db.order(ref);
             in.mismatch = db.mismatch(in.order);
@@ -979,15 +973,9 @@ public class MainActivity extends AppCompatActivity {
             android.database.sqlite.SQLiteDatabase w = db.getWritableDatabase();
             in.lineState = !db.getMeta("nftsent:" + key, "").isEmpty() ? DeliveryLedger.SENT : DeliveryLedger.state(w, ledgerKey(ref, line));
             in.resuming = !db.getMeta("nftposted:" + key, "").isEmpty();
-            in.tokenReply = t; in.holdingsReply = h; in.paymentReply = pay;
+            in.tokenReply = t; in.holdingsReply = h; in.paid = paid;
             in.tip = tipOf(b);
             in.minConf = minConf();
-            JSONArray coins = pay == null ? null : pay.optJSONArray("response");
-            for (int i = 0; coins != null && i < coins.length(); i++) {
-                JSONObject c = coins.optJSONObject(i); if (c == null) continue;
-                String id = c.optString("coinid", "").toLowerCase(java.util.Locale.ROOT);
-                in.counted.put(id, db.getMeta("paycoin:" + id, ""));
-            }
             DeliveryRules.Verdict v = DeliveryRules.reasons(in);
             if (!v.product.isEmpty()) {
                 String tokenPrefix = v.product.substring(0, v.product.lastIndexOf('|', v.product.lastIndexOf('|') - 1) + 1);   // shop|token|
@@ -996,8 +984,78 @@ public class MainActivity extends AppCompatActivity {
                 v = DeliveryRules.reasons(in);
             }
             final DeliveryRules.Verdict out = v;
+            db.setMeta("verdict:" + key, v.reasons.isEmpty() ? "" : String.join("\n", v.reasons));   // shown on the screen until the next check
+            db.setMeta("verdictat:" + key, String.valueOf(in.tip));
             ui.post(() -> then.accept(out));
         })))));
+    }
+
+    /** Once per block: every paid order's coins that reached the minimum confirmations are read back by id and kept
+     *  confirmed, so revenue the vendor spends or consolidates afterwards still counts for its delivery. */
+    private void confirmSweep(final long tip) {
+        io.execute(() -> {
+            for (MerchDb.Order o : db.orders()) {
+                if (!"seller".equals(o.role) || !o.paid) continue;
+                boolean open = false;
+                for (DeliveryRules.PaidCoin c : paidCoins(o.ref)) if (!DeliveryRules.PaidCoin.CONFIRMED.equals(c.state)) open = true;
+                if (open) { final String ref = o.ref; ui.post(() -> settlePayments(ref, tip, ignored -> {})); }
+            }
+        });
+    }
+
+    /** The coins counted for an order: those MerchDb kept with their block, then older ones known only by their
+     *  paycoin marker (read back by id for their block and amount). Coins already confirmed stay confirmed. */
+    List<DeliveryRules.PaidCoin> paidCoins(String ref) {
+        List<DeliveryRules.PaidCoin> out = new ArrayList<>();
+        java.util.Set<String> seen = new java.util.HashSet<>();
+        JSONArray pc;
+        try { pc = new JSONArray(db.getMeta("paidcoins:" + ref, "[]")); } catch (Exception e) { pc = new JSONArray(); }
+        for (int i = 0; i < pc.length(); i++) {
+            JSONObject x = pc.optJSONObject(i); if (x == null) continue;
+            String id = x.optString("coinid").toLowerCase(java.util.Locale.ROOT);
+            if (id.isEmpty() || !seen.add(id)) continue;
+            String owner = db.getMeta("paycoin:" + id, "");
+            if (!owner.isEmpty() && !owner.equals(ref)) continue;   // counted for another order: never here
+            out.add(new DeliveryRules.PaidCoin(id, x.optString("amount", null), x.optString("tokenid", null), x.optLong("created", 0)));
+        }
+        try (android.database.Cursor q = db.getReadableDatabase().rawQuery("SELECT k FROM meta WHERE k LIKE 'paycoin:%' AND v=?", new String[]{ref})) {
+            while (q.moveToNext()) {
+                String id = q.getString(0).substring(8).toLowerCase(java.util.Locale.ROOT);
+                if (seen.add(id)) out.add(new DeliveryRules.PaidCoin(id, null, null, 0));   // counted before 0.5.31
+            }
+        }
+        for (DeliveryRules.PaidCoin c : out) if (!db.getMeta("paidconf:" + c.coinid, "").isEmpty()) c.state = DeliveryRules.PaidCoin.CONFIRMED;
+        return out;
+    }
+
+    /** Settle every coin counted for an order against the tip (DeliveryRules.settle): at most MAX_COIN_READS reads
+     *  by id, one coin each, never the address; a coin found confirmed is kept confirmed ("paidconf:" = the block). */
+    private void settlePayments(final String ref, final long tip, final java.util.function.Consumer<List<DeliveryRules.PaidCoin>> then) {
+        io.execute(() -> {
+            final MerchDb.Order o = db.order(ref);
+            if (o == null) { ui.post(() -> then.accept(null)); return; }
+            final String nonce = db.nonce(o);
+            final int minConf = minConf();
+            final List<DeliveryRules.PaidCoin> coins = paidCoins(ref);
+            ui.post(() -> settleNext(ref, nonce, tip, minConf, coins, 0, 0, then));
+        });
+    }
+
+    private void settleNext(String ref, String nonce, long tip, int minConf, List<DeliveryRules.PaidCoin> coins, int i, int reads,
+                            java.util.function.Consumer<List<DeliveryRules.PaidCoin>> then) {
+        if (i >= coins.size()) { then.accept(coins); return; }
+        DeliveryRules.PaidCoin c = coins.get(i);
+        boolean waiting = c.created > 0 && (tip <= 0 || tip - c.created + 1 < minConf);
+        if (DeliveryRules.PaidCoin.CONFIRMED.equals(c.state) || waiting || reads >= DeliveryRules.MAX_COIN_READS || !c.coinid.matches("0x[0-9a-f]{1,128}")) {
+            if (waiting) c.state = DeliveryRules.PaidCoin.WAITING;
+            settleNext(ref, nonce, tip, minConf, coins, i + 1, reads, then);
+            return;
+        }
+        ask("coins relevant:true coinid:" + c.coinid, r -> {
+            DeliveryRules.settle(c, r, ref, nonce, tip, minConf);
+            if (DeliveryRules.PaidCoin.CONFIRMED.equals(c.state)) io.execute(() -> db.setMeta("paidconf:" + c.coinid, String.valueOf(tip)));
+            ui.post(() -> settleNext(ref, nonce, tip, minConf, coins, i + 1, reads + 1, then));
+        });
     }
 
     /** One node command; the callback gets the reply, or null on no answer (or when cmd is null). */

@@ -185,6 +185,23 @@ public class MerchDb extends SQLiteOpenHelper implements CommsScanner.MetaStore 
      *  ({@link #nonce}) counts only coins carrying its commitment (MerchMessage.commitment): any other coin with
      *  its ref is not its payment (returns null, nothing counted). */
     public String recordPayment(String ref, String coinid, String paidAmount, String paidTokenid, String coinCommitment) {
+        return recordPayment(ref, coinid, paidAmount, paidTokenid, coinCommitment, 0);
+    }
+
+    /** As above, with the block the coin was created at (0 = unknown), kept with it so a delivery counts its
+     *  confirmations from it and never reads the vendor's address again. The whole record, its reads and every
+     *  write, is one transaction (a scan and a vendor action never interleave in it). */
+    public synchronized String recordPayment(String ref, String coinid, String paidAmount, String paidTokenid, String coinCommitment, long created) {
+        SQLiteDatabase tx = getWritableDatabase();
+        tx.beginTransaction();
+        try {
+            String r = recordPaymentIn(ref, coinid, paidAmount, paidTokenid, coinCommitment, created);
+            tx.setTransactionSuccessful();
+            return r;
+        } finally { tx.endTransaction(); }
+    }
+
+    private String recordPaymentIn(String ref, String coinid, String paidAmount, String paidTokenid, String coinCommitment, long created) {
         Order o = order(ref);
         if (o == null || o.paid || coinid == null || coinid.isEmpty()) return null;
         String n = nonce(o), cc = coinCommitment == null ? "" : coinCommitment;
@@ -197,8 +214,8 @@ public class MerchDb extends SQLiteOpenHelper implements CommsScanner.MetaStore 
         if (!mine) {
             if (!cc.isEmpty() && (!getMeta("othercommit:" + ref + ":" + cc.toLowerCase(java.util.Locale.ROOT), "").isEmpty()
                     || "1".equals(getMeta("conflictoverflow:" + ref, ""))))
-                contendedPayment(o, coinid, paidAmount, paidTokenid, cc);
-            else if (cc.isEmpty() && !n.isEmpty()) unassignedPayment(ref, coinid, paidAmount, paidTokenid);   // L-B
+                contendedPayment(o, coinid, paidAmount, paidTokenid, cc, created);
+            else if (cc.isEmpty() && !n.isEmpty()) unassignedPayment(ref, coinid, paidAmount, paidTokenid, created);   // L-B
             return null;
         }
         String want = MerchMessage.tokenFor(o.currency);
@@ -230,7 +247,7 @@ public class MerchDb extends SQLiteOpenHelper implements CommsScanner.MetaStore 
             if (v.size() > 0) db.update(ORD, v, "ref=?", new String[]{ref});
             // the coins counted for the order of record, so they move with it on a switch (L-C)
             org.json.JSONArray pc = coinList("paidcoins:" + ref);
-            try { pc.put(new org.json.JSONObject().put("coinid", coinid).put("amount", nz(paidAmount)).put("tokenid", nz(paidTokenid)).put("commitment", cc.toLowerCase(java.util.Locale.ROOT))); }
+            try { pc.put(new org.json.JSONObject().put("coinid", coinid).put("amount", nz(paidAmount)).put("tokenid", nz(paidTokenid)).put("commitment", cc.toLowerCase(java.util.Locale.ROOT)).put("created", created)); }
             catch (org.json.JSONException ignored) {}
             ContentValues pm = new ContentValues(); pm.put("k", "paidcoins:" + ref); pm.put("v", pc.toString());
             db.insertWithOnConflict(META, null, pm, SQLiteDatabase.CONFLICT_REPLACE);
@@ -323,11 +340,11 @@ public class MerchDb extends SQLiteOpenHelper implements CommsScanner.MetaStore 
      *  counted for nothing, shown to the vendor. */
     public org.json.JSONArray unassignedCoins(String ref) { return coinList("unassigned:" + ref); }
 
-    private void unassignedPayment(String ref, String coinid, String amount, String tokenid) {
+    private void unassignedPayment(String ref, String coinid, String amount, String tokenid, long created) {
         org.json.JSONArray a = unassignedCoins(ref);
         if (a.length() >= MAX_CONTENDED_COINS) { setMeta("unassignedfull:" + ref, "1"); return; }
         for (int i = 0; i < a.length(); i++) { org.json.JSONObject x = a.optJSONObject(i); if (x != null && coinid.equalsIgnoreCase(x.optString("coinid"))) return; }
-        try { a.put(new org.json.JSONObject().put("coinid", coinid).put("amount", nz(amount)).put("tokenid", nz(tokenid))); } catch (org.json.JSONException ignored) {}
+        try { a.put(new org.json.JSONObject().put("coinid", coinid).put("amount", nz(amount)).put("tokenid", nz(tokenid)).put("created", created)); } catch (org.json.JSONException ignored) {}
         setMeta("unassigned:" + ref, a.toString());
     }
 
@@ -348,13 +365,13 @@ public class MerchDb extends SQLiteOpenHelper implements CommsScanner.MetaStore 
      *  The ref is flagged when the order of record has no secret (as before), when the commitment is of no kept order,
      *  or when that kept order's coins together reach its own due (from the listing where there is one): a stranger's
      *  tiny coin no longer holds back the order of record (final check M-A). */
-    private void contendedPayment(Order o, String coinid, String amount, String tokenid, String commitment) {
+    private void contendedPayment(Order o, String coinid, String amount, String tokenid, String commitment, long created) {
         String ref = o.ref, lc = commitment.toLowerCase(java.util.Locale.ROOT);
         org.json.JSONArray a = contendedCoins(ref);
         for (int i = 0; i < a.length(); i++) { org.json.JSONObject x = a.optJSONObject(i); if (x != null && coinid.equalsIgnoreCase(x.optString("coinid"))) return; }
         boolean full = a.length() >= MAX_CONTENDED_COINS;
         if (!full) {
-            try { a.put(new org.json.JSONObject().put("coinid", coinid).put("amount", nz(amount)).put("tokenid", nz(tokenid)).put("commitment", lc)); }
+            try { a.put(new org.json.JSONObject().put("coinid", coinid).put("amount", nz(amount)).put("tokenid", nz(tokenid)).put("commitment", lc).put("created", created)); }
             catch (org.json.JSONException ignored) {}
         }
         org.json.JSONObject owner = null;
@@ -463,7 +480,7 @@ public class MerchDb extends SQLiteOpenHelper implements CommsScanner.MetaStore 
         } finally { db.endTransaction(); }
         for (int k = 0; k < replay.length(); k++) {
             org.json.JSONObject x = replay.optJSONObject(k);
-            if (x != null) recordPayment(ref, x.optString("coinid"), x.optString("amount"), x.optString("tokenid"), x.optString("commitment"));
+            if (x != null) recordPayment(ref, x.optString("coinid"), x.optString("amount"), x.optString("tokenid"), x.optString("commitment"), x.optLong("created"));
         }
         return true;
     }

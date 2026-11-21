@@ -36,7 +36,7 @@ public class PiecesTest {
         in.tokenReply = new JSONObject().put("status", true).put("response", new JSONObject().put("tokenid", T).put("decimals", 0)
                 .put("script", StateNft.script("0x" + "11".repeat(32), "embed")));
         in.holdingsReply = new JSONObject().put("status", true).put("response", new JSONArray().put(new JSONObject().put("tokenid", T).put("tokenamount", "8")));
-        in.paymentReply = new JSONObject().put("status", true).put("response", new JSONArray());
+        in.paid = new java.util.ArrayList<>();
         return in;
     }
     static boolean says(DeliveryRules.Verdict v, String part) { for (String r : v.reasons) if (r.contains(part)) return true; return false; }

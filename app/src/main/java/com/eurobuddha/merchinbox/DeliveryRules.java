@@ -10,9 +10,7 @@ import org.json.JSONObject;
 import java.math.BigDecimal;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
-import java.util.HashMap;
 import java.util.List;
-import java.util.Map;
 
 /**
  * "The vendor cannot be drained" (owner, 2026-11-20). Nothing leaves the vendor's wallet from the Inbox
@@ -26,9 +24,11 @@ import java.util.Map;
  * 3. Stock across orders: what was already delivered of the product plus this line never exceeds the listed
  *    stock, and what is in flight plus this line never exceeds what the vendor holds (DeliveryLedger, re-checked
  *    inside the reservation's transaction).
- * 4. Paid in full on chain: coins of the currency's token at the vendor's own address carrying the order's ref,
- *    each counted for this order only, each with at least the vendor's minimum confirmations and present
- *    (unspent) when read, summing to at least the due amount recomputed from the listing, which is above zero.
+ * 4. Paid in full on chain: the coins counted for this order when they arrived (its ref, its commitment, the
+ *    currency's token), each with at least the vendor's minimum confirmations from its own block, read back by id
+ *    to confirm it really was on chain then (kept confirmed afterwards, so revenue the vendor spends later still
+ *    counts), summing to at least the due amount recomputed from the listing, which is above zero. The vendor's
+ *    address is never read: its coin count can grow without bound.
  * 5. Once only: a line already sent, or whose send did not finish, is never sent again here
  *    (DeliveryLedger; the vendor releases an unfinished one only after checking the history).
  * 6. The recipient is the buyer address in the order, a valid Minima address.
@@ -38,8 +38,42 @@ final class DeliveryRules {
     /** The default minimum confirmations of a payment coin; the vendor may raise it, never below 1. */
     static final int DEFAULT_MIN_CONF = 3;
 
-    /** The most payment coins one check reads (the node hands a large reply over as a file, never inline). */
-    static final int MAX_PAYMENT_COINS = 2000;
+    /** The most payment coins one check reads back by id; the others wait for the next check. */
+    static final int MAX_COIN_READS = 32;
+
+    /** A coin counted for the order when it arrived (MerchDb paidcoins, or an older paycoin marker), as checked now. */
+    static final class PaidCoin {
+        static final String CONFIRMED = "CONFIRMED", WAITING = "WAITING", GONE = "GONE", UNREAD = "UNREAD";
+        final String coinid; String amount, tokenid; long created; String state = UNREAD;
+        PaidCoin(String coinid, String amount, String tokenid, long created) { this.coinid = coinid; this.amount = amount; this.tokenid = tokenid; this.created = created; }
+    }
+
+    /** Settles one coin from its read by id ({@code coins coinid:}, null = no answer): it must still be the order's
+     *  payment (its ref in port 1, the order's commitment in port 2 or none for an order without a secret, the same
+     *  token and amount as when it was counted), with at least {@code minConf} confirmations from its own block. A
+     *  coin no longer in the reply never reached them (once reached, the caller keeps it CONFIRMED for good). */
+    static void settle(PaidCoin c, JSONObject read, String ref, String nonce, long tip, int minConf) {
+        if (PaidCoin.CONFIRMED.equals(c.state)) return;
+        if (c.created > 0 && (tip <= 0 || tip - c.created + 1 < minConf)) { c.state = PaidCoin.WAITING; return; }
+        JSONArray a = read == null || !read.optBoolean("status", false) ? null : read.optJSONArray("response");
+        if (a == null) { c.state = PaidCoin.UNREAD; return; }
+        JSONObject k = null;
+        for (int i = 0; i < a.length(); i++) if (a.optJSONObject(i) != null && c.coinid.equalsIgnoreCase(a.optJSONObject(i).optString("coinid"))) k = a.optJSONObject(i);
+        if (k == null) { c.state = PaidCoin.GONE; return; }
+        String h = CommsScanner.statePort(k, 1), cc = CommsScanner.statePort(k, 2), amount = MerchDb.coinAmount(k), token = k.optString("tokenid", "");
+        boolean same = h != null && ref.equals(text(h)) && (nonce.isEmpty() ? cc == null : MerchMessage.commitment(nonce).equalsIgnoreCase(cc))
+                && (c.tokenid == null || c.tokenid.equalsIgnoreCase(token)) && (c.amount == null || eqAmount(c.amount, amount));
+        if (!same) { c.state = PaidCoin.GONE; return; }
+        long created;
+        try { created = Long.parseLong(k.optString("created", "")); } catch (NumberFormatException e) { created = 0; }
+        if (created <= 0 || (c.created > 0 && created != c.created)) { c.state = PaidCoin.GONE; return; }
+        c.created = created; c.amount = amount; c.tokenid = token;
+        c.state = tip > 0 && tip - created + 1 >= minConf ? PaidCoin.CONFIRMED : PaidCoin.WAITING;
+    }
+
+    private static boolean eqAmount(String a, String b) {
+        try { return new BigDecimal(a).compareTo(new BigDecimal(b)) == 0; } catch (RuntimeException e) { return false; }
+    }
 
     private DeliveryRules() {}
 
@@ -57,10 +91,10 @@ final class DeliveryRules {
         BigDecimal delivered = BigDecimal.ZERO, inflight = BigDecimal.ZERO;
         BigDecimal deliveredOfToken = BigDecimal.ZERO;   // every product of this token in this shop (L1)
         boolean bundleTaken;                             // its complete collection is reserved or sent (L1)
-        JSONObject tokenReply, holdingsReply, paymentReply;
+        JSONObject tokenReply, holdingsReply;
+        List<PaidCoin> paid;          // the coins counted for this order, settled (null = they could not be read)
         long tip;                     // current chain height
         int minConf = DEFAULT_MIN_CONF;
-        Map<String, String> counted = new HashMap<>();   // coin id (lower case) -> the ref it was counted for
     }
 
     static final class Verdict {
@@ -125,28 +159,26 @@ final class DeliveryRules {
                 v.reasons.add("you hold " + v.held.toPlainString() + " of token " + tokenid + " and " + in.inflight.toPlainString() + " are already being sent");
         }
 
-        // 4. paid in full on chain, with confirmations
+        // 4. paid in full on chain, with confirmations: the coins counted for this order when they arrived (MerchDb
+        //    paidcoins), each confirmed from its own block and read back by id once; never the vendor's address
         String want = MerchMessage.tokenFor(o.currency);
-        JSONArray coins = in.paymentReply == null || !in.paymentReply.optBoolean("status", false) ? null : in.paymentReply.optJSONArray("response");
         if (in.tip <= 0) v.reasons.add("the chain height could not be read");
-        if (coins != null && coins.length() > MAX_PAYMENT_COINS) { v.reasons.add("more than " + MAX_PAYMENT_COINS + " coins of this token are at your address: consolidate them before sending (M3)"); coins = null; }
-        else if (coins == null) v.reasons.add("your payment coins could not be read");
-        else if (want != null) for (int i = 0; i < coins.length(); i++) {
-            JSONObject c = coins.optJSONObject(i);
-            if (c == null || !want.equalsIgnoreCase(c.optString("tokenid", "")) || c.optBoolean("spent", false)) continue;
-            String h = CommsScanner.statePort(c, 1);   // no port 1, or not hex UTF-8, is never a payment (C1)
-            if (o.ref.isEmpty() || h == null || !o.ref.equals(text(h))) continue;
-            // a coin carrying a commitment pays only the order with that secret; a reference-only order only coins without one (delta M-1)
-            String cc = CommsScanner.statePort(c, 2);
-            if (!(in.nonce.isEmpty() ? cc == null : MerchMessage.commitment(in.nonce).equalsIgnoreCase(cc))) continue;
-            String id = c.optString("coinid", "").toLowerCase(java.util.Locale.ROOT);
-            String owner = in.counted.get(id);
-            if (owner != null && !owner.isEmpty() && !owner.equals(o.ref)) { v.reasons.add("coin " + id + " was counted for order " + owner); continue; }
-            long created;
-            try { created = Long.parseLong(c.optString("created", "")); } catch (NumberFormatException e) { created = Long.MAX_VALUE; }
-            long conf = in.tip - created + 1;
-            if (in.tip <= 0 || conf < in.minConf) { v.reasons.add("coin " + id + " has " + Math.max(0, conf) + " confirmation(s); " + in.minConf + " are needed"); continue; }
-            try { v.paid = v.paid.add(new BigDecimal(MerchDb.coinAmount(c))); } catch (NumberFormatException ignored) {}
+        if (in.paid == null) v.reasons.add("your payment coins could not be read");
+        else if (want != null) for (PaidCoin c : in.paid) {
+            if (c.tokenid != null && !want.equalsIgnoreCase(c.tokenid)) continue;
+            switch (c.state) {
+                case PaidCoin.CONFIRMED:
+                    try { v.paid = v.paid.add(new BigDecimal(c.amount)); } catch (RuntimeException ignored) {}
+                    break;
+                case PaidCoin.WAITING:
+                    v.reasons.add("coin " + c.coinid + " has " + Math.max(0, in.tip - c.created + 1) + " confirmation(s); " + in.minConf + " are needed");
+                    break;
+                case PaidCoin.GONE:
+                    v.reasons.add("coin " + c.coinid + " is not on chain any more and never reached " + in.minConf + " confirmation(s)");
+                    break;
+                default:
+                    v.reasons.add("coin " + c.coinid + " could not be read");
+            }
         }
         if (v.due == null || v.due.signum() <= 0 || v.paid.compareTo(v.due) < 0)
             v.reasons.add("paid on chain with enough confirmations: " + v.paid.toPlainString() + " of " + (v.due == null ? "an unknown amount" : v.due.toPlainString()) + " due");

@@ -190,12 +190,5 @@ public class ListingTest {
         assertFalse(u.older); assertFalse(u.listing.has("signedAt"));
     }
 
-    @Test public void thePaymentReadIsBoundedByTheOrder() {
-        String a = VENDOR_ADDR, t = "0x00";
-        assertEquals("coins relevant:true address:" + a + " tokenid:0x00 depth:12", MainActivity.paymentRead(a, t, 1000, 990, 0, 0));
-        assertEquals("from the date: 1 hour = 144 + 100", "coins relevant:true address:" + a + " tokenid:0x00 depth:244", MainActivity.paymentRead(a, t, 1000, 0, 0, 3_600_000));
-        assertEquals("never deeper than the chain", "coins relevant:true address:" + a + " tokenid:0x00 depth:1001", MainActivity.paymentRead(a, t, 1000, 0, 0, Long.MAX_VALUE / 2));
-        assertNull("no chain height: no read", MainActivity.paymentRead(a, t, 0, 990, 0, 0));
-    }
     static final String VENDOR_ADDR = "0x" + "12".repeat(32);
 }
