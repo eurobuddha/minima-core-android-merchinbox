@@ -328,4 +328,19 @@ public class DrainTest {
         db.setMeta("autodeliverbanner", "1");
         assertFalse((Boolean) call("autoDeliverWasOn", new Class<?>[]{}));
     }
+
+    /** Point release items 7 and 8: a scanner's message is stored on the io executor and counted for the scan's end;
+     *  no dialog is shown once the screen is finishing. */
+    @Test public void scannerWorkRunsOnIoAndNoDialogOutlivesTheScreen() throws Exception {
+        java.util.List<String> handled = new java.util.ArrayList<>();
+        com.eurobuddha.comms.CommsScanner.Router r = (com.eurobuddha.comms.CommsScanner.Router) call("onIo", new Class<?>[]{com.eurobuddha.comms.CommsScanner.Router.class},
+                (com.eurobuddha.comms.CommsScanner.Router) (cid, op, coin) -> { handled.add(cid); return true; });
+        assertFalse("the scanner thread never waits for the database", r.handle("0xC9", null, new JSONObject()));
+        assertEquals(java.util.Collections.singletonList("0xC9"), handled);   // run by the (inline) io executor
+        java.lang.reflect.Field f = MainActivity.class.getDeclaredField("routedNew"); f.setAccessible(true);
+        assertEquals(1, ((java.util.concurrent.atomic.AtomicInteger) f.get(activity)).get());
+        activity.finish();
+        androidx.appcompat.app.AlertDialog d = ((androidx.appcompat.app.AlertDialog.Builder) call("dialog", new Class<?>[]{})).setMessage("late").show();
+        assertFalse("not shown on a finishing screen", d.isShowing());
+    }
 }

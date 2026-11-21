@@ -99,7 +99,7 @@ public class MainActivity extends AppCompatActivity {
      *  the next app open (autoDeliverSweep) gets exactly one more automatic attempt. */
     private final java.util.HashSet<String> autoTried = new java.util.HashSet<>();
     /** Orders whose payment flipped to PAID during the current scan pass (main thread only). */
-    private final java.util.HashSet<String> pendingAutoDeliver = new java.util.HashSet<>();
+    private final java.util.Set<String> pendingAutoDeliver = java.util.Collections.synchronizedSet(new java.util.HashSet<>());
     private boolean autoSweepDone = false;
 
     private LinearLayout root;
@@ -114,7 +114,7 @@ public class MainActivity extends AppCompatActivity {
         super.onCreate(b);
         replyDrafts.restore(b);
         ls = Sodium.get();
-        db = new MerchDb(this);
+        db = new MerchDb(getApplicationContext());   // item 8: the store never holds this Activity
         shopName = loadShopName();
 
         root = new LinearLayout(this);
@@ -138,7 +138,7 @@ public class MainActivity extends AppCompatActivity {
         showOrders();
         if (b != null) {
             String orderRef = b.getString("mall.openOrder", "");
-            if (!orderRef.isEmpty() && db.order(orderRef) != null) push(buildOrderDetail(orderRef));
+            if (!orderRef.isEmpty()) showOrderAsync(orderRef, true);
         }
 
         node = new NodeApi(this, this::onPaired);
@@ -167,6 +167,9 @@ public class MainActivity extends AppCompatActivity {
         if (notifyReceiver != null) try { unregisterReceiver(notifyReceiver); } catch (Exception ignored) {}
         if (node != null) node.onDestroy();
         io.shutdownNow();
+        ui.removeCallbacksAndMessages(null);   // item 8: nothing posted earlier runs against a dead screen
+        db.dues = null;                        // the store keeps no reference to this Activity
+        db.close();
     }
 
     @Override public void onBackPressed() { if (stack.size() > 1) pop(); else super.onBackPressed(); }
@@ -226,6 +229,7 @@ public class MainActivity extends AppCompatActivity {
     private void fetchBlock() {
         node.cmd("block", new NodeApi.Cb() {
             @Override public void onResult(JSONObject j) {
+                if (gone()) return;
                 JSONObject r = j.optJSONObject("response");
                 int was = chainBlock;
                 if (r != null) try { chainBlock = Integer.parseInt(r.optString("block", "0")); } catch (Exception ignored) {}
@@ -259,29 +263,36 @@ public class MainActivity extends AppCompatActivity {
         });
     }
 
+    /** Item 7: a scanner's message or payment is stored on the io executor (in order: one thread), never on the main
+     *  thread; what it adds is counted for the scan's end. */
+    private final java.util.concurrent.atomic.AtomicInteger routedNew = new java.util.concurrent.atomic.AtomicInteger();
+    private CommsScanner.Router onIo(final CommsScanner.Router r) {
+        return (cid, opened, coin) -> { io.execute(() -> { if (r.handle(cid, opened, coin)) routedNew.incrementAndGet(); }); return false; };
+    }
+
     private void adoptIdentity(CommsIdentity id) {
         identity = id;
         crypto = new LocalEcCryptoProvider(ls, id);
         myId = id.publicId();
         orderScanner = new CommsScanner(node, crypto, db, CommsTransport.MINIMERCH_ADDRESS,
-                this::routeIncoming, (ok, n) -> onScanDone(n));
+                onIo(this::routeIncoming), (ok, n) -> io.execute(() -> onScanDone(routedNew.getAndSet(0))));
         if (!vendorAddr.isEmpty()) startPaymentScanner();
     }
 
     private void startPaymentScanner() {
         paymentScanner = new CommsScanner(node, crypto, db, vendorAddr,
-                this::routePayment, (ok, n) -> {
-                    onScanDone(n);
+                onIo(this::routePayment), (ok, n) -> io.execute(() -> {
+                    onScanDone(routedNew.getAndSet(0));   // after every routed coin (the io executor runs in order)
                     // After the first clean pass, auto-deliver anything paid-but-unsent (e.g. an
                     // auto-send that failed last session, or a payment that landed while closed).
-                    if (ok && !autoSweepDone) { autoSweepDone = true; autoDeliverSweep(); }
-                }, false);
+                    if (ok) ui.post(() -> { if (!autoSweepDone) { autoSweepDone = true; autoDeliverSweep(); } });
+                }), false);
     }
 
     private void askForSeed() {
         final EditText in = input("Your Minima seed phrase");
         in.setMinLines(3);
-        AlertDialog seedDialog = new AlertDialog.Builder(this)
+        AlertDialog seedDialog = dialog()
                 .setTitle("Create your shop identity")
                 .setMessage("Your shop key is derived from your Minima seed (recoverable, distinct from other apps). Paste your seed phrase once — it's used only to derive the key and is never stored.")
                 .setView(in)
@@ -380,14 +391,14 @@ public class MainActivity extends AppCompatActivity {
                 // builder, older Studio) is allowed only here, with the warning, and only on "Use this listing".
                 String raw = new String(bos.toByteArray(), java.nio.charset.StandardCharsets.UTF_8);
                 final Listing.Prepared p = Listing.prepare(raw, crypto, me, this::listingFor);
-                ui.post(() -> new AlertDialog.Builder(this).setTitle(p.signed ? "Use this listing?" : "Use this UNSIGNED listing?").setMessage(p.summary)
+                ui.post(() -> dialog().setTitle(p.signed ? "Use this listing?" : "Use this UNSIGNED listing?").setMessage(p.summary)
                         .setPositiveButton("Use this listing", (d, w) -> useListing(p.listing, p.signed))
                         .setNegativeButton("Cancel", null).show());
                 return;
             } catch (IllegalArgumentException e) { msg = e.getMessage(); }
             catch (Exception e) { msg = "That file could not be read."; }
             final String say = msg;
-            ui.post(() -> { new AlertDialog.Builder(this).setTitle("Your listing").setMessage(say).setPositiveButton("OK", null).show(); refreshVisibleOrderOrList(); });
+            ui.post(() -> { dialog().setTitle("Your listing").setMessage(say).setPositiveButton("OK", null).show(); refreshVisibleOrderOrList(); });
         });
     }
 
@@ -407,7 +418,7 @@ public class MainActivity extends AppCompatActivity {
             int checked = 0;
             for (MerchDb.Order o : db.orders()) if ("seller".equals(o.role) && shopId.equals(o.shopId)) { recheck(o); checked++; }
             final String say = "Your listing for \"" + listing.optString("shopName", shopId) + "\" is in. " + checked + " order(s) checked against it; new orders are checked as they arrive.";
-            ui.post(() -> { new AlertDialog.Builder(this).setTitle("Your listing").setMessage(say).setPositiveButton("OK", null).show(); refreshVisibleOrderOrList(); });
+            ui.post(() -> { dialog().setTitle("Your listing").setMessage(say).setPositiveButton("OK", null).show(); refreshVisibleOrderOrList(); });
         });
     }
 
@@ -520,7 +531,7 @@ public class MainActivity extends AppCompatActivity {
         ad.setTextSize(12.5f); ad.setPadding(dp(16), 0, dp(16), dp(4));
         ad.setOnClickListener(v -> {
             if (auto) { io.execute(() -> { db.setMeta("autosend", "0"); ui.post(() -> refreshTop(buildOrders())); }); return; }
-            new AlertDialog.Builder(this).setTitle("Turn on automatic NFT delivery?")
+            dialog().setTitle("Turn on automatic NFT delivery?")
                     .setMessage("An NFT is then sent without asking you, but only when the order matches your imported listing, the line is listed and in stock, it was not sent before, and the payment is on chain in full with at least " + minConf() + " confirmation(s). Anything else waits for you with the reasons listed.")
                     .setPositiveButton("Turn on", (d, w) -> io.execute(() -> { db.setMeta("autosend", "1"); ui.post(() -> refreshTop(buildOrders())); }))
                     .setNegativeButton("Cancel", null).show();
@@ -532,7 +543,7 @@ public class MainActivity extends AppCompatActivity {
         mc.setOnClickListener(v -> {
             final EditText in = new EditText(this);
             in.setInputType(android.text.InputType.TYPE_CLASS_NUMBER); in.setText(String.valueOf(minConf()));
-            new AlertDialog.Builder(this).setTitle("Confirmations").setMessage("How many blocks a payment coin must have before an NFT is sent (at least 1).").setView(in)
+            dialog().setTitle("Confirmations").setMessage("How many blocks a payment coin must have before an NFT is sent (at least 1).").setView(in)
                     .setPositiveButton("Save", (d, w) -> {
                         int n; try { n = Integer.parseInt(in.getText().toString().trim()); } catch (NumberFormatException e) { n = 0; }
                         if (n < 1) { toast("At least 1 confirmation."); return; }
@@ -643,11 +654,68 @@ public class MainActivity extends AppCompatActivity {
     // ---- order detail ----
 
     private void openOrder(String ref) {
-        io.execute(() -> { db.markRead(ref); ui.post(() -> push(buildOrderDetail(ref))); });
+        io.execute(() -> { db.markRead(ref); showOrderAsync(ref, true); });
     }
 
-    private View buildOrderDetail(String ref) {
-        MerchDb.Order o = db.order(ref);
+    /** Everything the order screen shows, read on the io executor (item 7: no database work while a screen is built). */
+    static final class OrderModel {
+        String ref; MerchDb.Order o;
+        boolean mismatch, conflict, upgraded, listing, autoOn, contendedFull, cameFirst;
+        String nonce = "", listingSigned = "", problems = "", due = "", orderBlock = "";
+        boolean checked;
+        List<String[]> nfts = new ArrayList<>();
+        java.util.Map<String, String> sentTx = new java.util.HashMap<>(), ledger = new java.util.HashMap<>(), verdict = new java.util.HashMap<>();
+        JSONArray contenders = new JSONArray(), unassigned = new JSONArray();
+        int committed = -1;
+        List<String[]> chat = new ArrayList<>();
+    }
+
+    OrderModel orderModel(String ref) {
+        OrderModel m = new OrderModel();
+        m.ref = ref; m.o = db.order(ref);
+        MerchDb.Order o = m.o;
+        if (o == null) return m;
+        m.mismatch = db.mismatch(o); m.conflict = db.conflict(o); m.nonce = db.nonce(o);
+        m.upgraded = "1".equals(db.getMeta("upgraded:" + ref, ""));
+        m.listing = listingFor(o.shopId) != null; m.listingSigned = db.getMeta("listingsigned:" + o.shopId, "");
+        m.problems = db.listingProblems(o); m.checked = db.checked(o); m.due = db.due(o);
+        m.autoOn = autoDeliverOn();
+        m.nfts = nftLines(o);
+        for (String[] line : m.nfts) {
+            String key = lineKey(ref, line);
+            m.sentTx.put(key, db.getMeta("nftsent:" + key, ""));
+            m.ledger.put(key, DeliveryLedger.state(db.getReadableDatabase(), ledgerKey(ref, line)));
+            m.verdict.put(key, storedVerdict(key));
+        }
+        m.contenders = db.contenders(ref); m.unassigned = db.unassignedCoins(ref);
+        m.committed = db.committedContender(o); m.contendedFull = db.contendedCoinsFull(ref);
+        m.cameFirst = m.conflict && m.nonce.isEmpty() && o.paid && recordCameFirst(o);
+        m.orderBlock = db.getMeta("orderblock:" + ref, "");
+        m.chat = db.chat(ref);
+        return m;
+    }
+
+    /** Builds the order screen for ref from a model read on the io executor, then pushes or refreshes it. */
+    private void showOrderAsync(final String ref, final boolean push) {
+        io.execute(() -> {
+            final OrderModel m = orderModel(ref);
+            ui.post(() -> {
+                if (isFinishing() || isDestroyed()) return;
+                if (push) push(buildOrderDetail(m));
+                else {
+                    View top = stack.peek(); Object tag = top == null ? null : top.getTag();
+                    if (tag instanceof String && tag.equals("order:" + ref)) refreshTop(buildOrderDetail(m));
+                }
+            });
+        });
+    }
+
+    /** The order screen read and built on the calling thread (tests; the app uses showOrderAsync). */
+    private View buildOrderDetail(String ref) { return buildOrderDetail(orderModel(ref)); }
+
+    private View buildOrderDetail(OrderModel m) {
+        String ref = m.ref;
+        MerchDb.Order o = m.o;
         LinearLayout col = column();
         col.setTag("order:" + ref);
         LinearLayout head = header(o == null ? "Order" : (o.product.isEmpty() ? o.ref : o.product), true);
@@ -674,7 +742,7 @@ public class MainActivity extends AppCompatActivity {
             st.addView(paid);
         }
         st.setPadding(0, 0, 0, dp(10)); body.addView(st);
-        if (db.mismatch(o)) {
+        if (m.mismatch) {
             String want = MerchMessage.tokenFor(o.currency);
             body.addView(label(want == null
                     ? "This order asks to be paid in \"" + o.currency + "\", which is neither Minima nor MxUSD. It is never marked paid, and its NFTs are never sent from this app."
@@ -687,22 +755,22 @@ public class MainActivity extends AppCompatActivity {
             body.addView(sectionLabel("Items"));
             body.addView(card(itemsText(o)));
             body.addView(kv("Total", o.amount + " " + dispCurrency(o)));
-            if (db.conflict(o)) {
+            if (m.conflict) {
                 TextView cf = label("Another order arrived with this reference (a reference is public once paid), so nothing is sent for it while it is contested. "
                         + "A payment counts only for the order whose secret it commits to; the other orders with this reference are listed below.");
                 cf.setTextColor(Design.RED); body.addView(cf);
-            } else if (db.nonce(o).isEmpty()) body.addView(label("This order came from an older Shop without a payment secret: its payment is matched by its reference only."));
-            if ("1".equals(db.getMeta("upgraded:" + o.ref, ""))) {
+            } else if (m.nonce.isEmpty()) body.addView(label("This order came from an older Shop without a payment secret: its payment is matched by its reference only."));
+            if (m.upgraded) {
                 TextView up = label("Upgraded: re-check this order's payment. It was recorded by an older Inbox, and nothing is sent until its coins are read back on chain.");
                 up.setTextColor(Design.RED); body.addView(up);
             }
-            if (listingFor(o.shopId) != null) body.addView(label(listingInUse(db.getMeta("listingsigned:" + o.shopId, ""))));
-            String problems = db.listingProblems(o);
+            if (m.listing) body.addView(label(listingInUse(m.listingSigned)));
+            String problems = m.problems;
             TextView chk = label(!problems.isEmpty()
                     ? "Not as you list it, so nothing is sent for this order:\n• " + problems.replace("\n", "\n• ")
-                    : db.checked(o) ? "Checked against your listing: due " + db.due(o) + " " + dispCurrency(o) + "."
+                    : m.checked ? "Checked against your listing: due " + m.due + " " + dispCurrency(o) + "."
                     : "Unchecked: the items and the total " + o.amount + " " + dispCurrency(o) + " are the buyer's own figures, and nothing can be sent for this order until you import the .shop file you published (⇪ on the orders screen).");
-            if (!problems.isEmpty() || !db.checked(o)) chk.setTextColor(Design.RED);
+            if (!problems.isEmpty() || !m.checked) chk.setTextColor(Design.RED);
             body.addView(chk);
             body.addView(kv("Reference", o.ref));
             if (!o.shopName.isEmpty()) body.addView(kv("Shop", o.shopName));
@@ -715,14 +783,14 @@ public class MainActivity extends AppCompatActivity {
             if (!o.message.isEmpty()) { body.addView(sectionLabel("Buyer note")); body.addView(card(o.message)); }
 
             // NFT delivery — order lines that carry an NFT tokenid (from an NFT Studio .shop)
-            List<String[]> nfts = nftLines(o);
+            List<String[]> nfts = m.nfts;
             if (!nfts.isEmpty()) {
-                body.addView(sectionLabel(autoDeliverOn() ? "NFT delivery · automatic" : "NFT delivery"));
-                for (String[] line : nfts) body.addView(nftSendRow(o, line));
+                body.addView(sectionLabel(m.autoOn ? "NFT delivery · automatic" : "NFT delivery"));
+                for (String[] line : nfts) body.addView(nftSendRow(m, o, line));
             }
         }
         body.addView(copyRow("Buyer key", o.counterparty, o.counterparty));
-        if (!inquiry) addContenders(body, o);
+        if (!inquiry) addContenders(body, m, o);
 
         // status actions (orders only — an enquiry has no lifecycle)
         if (!inquiry) {
@@ -732,19 +800,19 @@ public class MainActivity extends AppCompatActivity {
 
         // reply / conversation
         body.addView(sectionLabel(inquiry ? "Conversation" : "Message the buyer"));
-        body.addView(replyRow(o));
+        body.addView(replyRow(o, m.chat));
         return col;
     }
 
     /** The other orders that arrived with this ref (delta review H-1): sender, buyer address and items whole, which one
      *  a payment commits to, and the one action the vendor has: make THAT order the order of record. */
-    private void addContenders(LinearLayout body, final MerchDb.Order o) {
-        JSONArray cs = db.contenders(o.ref);
-        JSONArray un = db.unassignedCoins(o.ref);
-        if (db.conflict(o) && db.nonce(o).isEmpty() && o.paid && recordCameFirst(o)) {
-            body.addView(label("This order's own coin is in block " + db.getMeta("orderblock:" + o.ref, "") + ", before every payment counted for it, so it existed before its reference was public."));
+    private void addContenders(LinearLayout body, OrderModel m, final MerchDb.Order o) {
+        JSONArray cs = m.contenders;
+        JSONArray un = m.unassigned;
+        if (m.cameFirst) {
+            body.addView(label("This order's own coin is in block " + m.orderBlock + ", before every payment counted for it, so it existed before its reference was public."));
             TextView keep = button("Deliver to the order of record (" + o.payaddr + ")", false);
-            keep.setOnClickListener(v -> new AlertDialog.Builder(this).setTitle("Deliver to the order of record?")
+            keep.setOnClickListener(v -> dialog().setTitle("Deliver to the order of record?")
                     .setMessage("The other order with this reference arrived after this one's payment made the reference public. Nothing else changes: every other check still applies.")
                     .setPositiveButton("Deliver to the order of record", (d, w) -> io.execute(() -> {
                         if (db.conflict(o) && recordCameFirst(db.order(o.ref))) { db.setMeta("conflict:" + o.ref, ""); db.setMeta("conflictresolved:" + o.ref, "orderblock"); }
@@ -753,9 +821,9 @@ public class MainActivity extends AppCompatActivity {
                     .setNegativeButton("Cancel", null).show());
             body.addView(keep);
         }
-        if (cs.length() == 0 && un.length() == 0 && !db.contendedCoinsFull(o.ref)) return;
-        int committed = db.committedContender(o);
-        if (db.contendedCoinsFull(o.ref)) { TextView t = label("More payments with this reference arrived than the Inbox keeps, so they could not all be read: no order can be switched here."); t.setTextColor(Design.RED); body.addView(t); }
+        if (cs.length() == 0 && un.length() == 0 && !m.contendedFull) return;
+        int committed = m.committed;
+        if (m.contendedFull) { TextView t = label("More payments with this reference arrived than the Inbox keeps, so they could not all be read: no order can be switched here."); t.setTextColor(Design.RED); body.addView(t); }
         for (int i = 0; i < un.length(); i++) {
             JSONObject u = un.optJSONObject(i); if (u == null) continue;
             body.addView(label("A payment with this reference and no payment secret, counted for no order: coin " + u.optString("coinid") + ", " + u.optString("amount") + " of token " + u.optString("tokenid") + "."));
@@ -822,7 +890,7 @@ public class MainActivity extends AppCompatActivity {
         View top = stack.peek();
         Object tag = top == null ? null : top.getTag();
         if (tag instanceof String && tag.equals("order:" + ref)) {
-            if (!replyDrafts.defer(ref)) refreshTop(buildOrderDetail(ref));
+            if (!replyDrafts.defer(ref)) showOrderAsync(ref, false);
         }
         else if (stack.size() == 1) refreshTop(buildOrders());
     }
@@ -882,14 +950,14 @@ public class MainActivity extends AppCompatActivity {
         return ref + ":" + line[1] + ("0".equals(line[3]) ? "" : "#" + line[3]);
     }
 
-    private View nftSendRow(final MerchDb.Order o, final String[] line) {
+    private View nftSendRow(OrderModel m, final MerchDb.Order o, final String[] line) {
         final String name = line[0], tokenid = line[1], qty = line[2];
         final boolean piece = !"0".equals(line[3]);
         final boolean bundle = "1".equals(line[4]);
         final String key = lineKey(o.ref, line);
         final String label = bundle ? "the complete collection (\"" + name + "\")"
                 : piece ? "\"" + name + "\"" : qty + " × " + name;
-        String sentTx = db.getMeta("nftsent:" + key, "");
+        String sentTx = m.sentTx.getOrDefault(key, "");
         if (!sentTx.isEmpty()) {
             TextView t = new TextView(this);
             t.setText("✓ Sent " + label + (("sent".equals(sentTx) || "posted".equals(sentTx)) ? "" : " · " + sentTx));
@@ -899,18 +967,18 @@ public class MainActivity extends AppCompatActivity {
         LinearLayout wrap = new LinearLayout(this); wrap.setOrientation(LinearLayout.VERTICAL);
         boolean inFlight = nftSending.contains(key);
         // A send that did not finish may have gone: nothing more is sent until the vendor has checked the history.
-        if (DeliveryLedger.RESERVED.equals(DeliveryLedger.state(db.getReadableDatabase(), ledgerKey(o.ref, line))) && !inFlight) {
+        if (DeliveryLedger.RESERVED.equals(m.ledger.get(key)) && !inFlight) {
             wrap.addView(label("This line's send did not finish and may have gone. Check your wallet's transaction history for "
                     + (bundle ? "the pieces" : piece ? "edition #" + line[3] : qty) + " of token\n" + tokenid + "\nto\n" + o.payaddr
                     + "\nNothing more is sent for it until you say it was not sent."));
             TextView rel = button("I checked: it was NOT sent", true);
-            rel.setOnClickListener(v -> new AlertDialog.Builder(this).setTitle("It was not sent?")
+            rel.setOnClickListener(v -> dialog().setTitle("It was not sent?")
                     .setMessage("Only if your wallet's history shows no send of token\n" + tokenid + "\nto\n" + o.payaddr + "\nfor this order. If it went, saying it did not lets it be sent twice.")
                     .setPositiveButton("It was not sent", (d, w) -> io.execute(() -> { DeliveryLedger.mark(db.getWritableDatabase(), ledgerKey(o.ref, line), DeliveryLedger.RELEASED); ui.post(() -> refreshOrderIfTopmost(o.ref)); }))
                     .setNegativeButton("Cancel", null).show());
             wrap.addView(rel);
             TextView went = button("I checked: it WAS sent", false);
-            went.setOnClickListener(v -> new AlertDialog.Builder(this).setTitle("It was sent?")
+            went.setOnClickListener(v -> dialog().setTitle("It was sent?")
                     .setMessage("Only if your wallet's history shows the send of token\n" + tokenid + "\nto\n" + o.payaddr + "\nfor this order. The line is then marked sent and never sent again.")
                     .setPositiveButton("It was sent", (d, w) -> io.execute(() -> {
                         DeliveryLedger.mark(db.getWritableDatabase(), ledgerKey(o.ref, line), DeliveryLedger.SENT);
@@ -930,12 +998,12 @@ public class MainActivity extends AppCompatActivity {
             if (nftSending.contains(key)) return;
             checkDelivery(o.ref, line, verdict -> {
                 if (!verdict.reasons.isEmpty()) {   // refused: there is no override
-                    new AlertDialog.Builder(this).setTitle("NFT not sent").setMessage("Not sent:\n• " + String.join("\n• ", verdict.reasons))
+                    dialog().setTitle("NFT not sent").setMessage("Not sent:\n• " + String.join("\n• ", verdict.reasons))
                             .setPositiveButton("OK", null).show();
                     return;
                 }
-                MerchDb.Order now = db.order(o.ref);
-                new AlertDialog.Builder(this)
+                MerchDb.Order now = verdict.order;
+                dialog()
                         .setTitle("Send NFT")
                         .setMessage("Send " + label + "?\n\nToken id\n" + tokenid + "\n\nQuantity\n"
                                 + (bundle ? "every piece you hold" : piece ? "1 (edition #" + line[3] + ")" : qty)
@@ -948,7 +1016,7 @@ public class MainActivity extends AppCompatActivity {
         });
         wrap.addView(b);
         wrap.addView(why);
-        why.setText(storedVerdict(key));   // the last check's verdict: a check runs only on Send or the automatic attempt
+        why.setText(m.verdict.get(key));   // the last check's verdict: a check runs only on Send or the automatic attempt
         return wrap;
     }
 
@@ -1107,10 +1175,19 @@ public class MainActivity extends AppCompatActivity {
     /** One node command; the callback gets the reply, or null on no answer (or when cmd is null). */
     private void ask(String cmd, java.util.function.Consumer<JSONObject> next) {
         if (cmd == null) { next.accept(null); return; }
-        node.cmd(cmd, new NodeApi.Cb() {
-            @Override public void onResult(JSONObject j) { next.accept(j); }
-            @Override public void onError(String m) { next.accept(null); }
+        node.cmd(cmd, new NodeApi.Cb() {   // item 8: a reply after this screen is gone reaches nothing
+            @Override public void onResult(JSONObject j) { if (!gone()) next.accept(j); }
+            @Override public void onError(String m) { if (!gone()) next.accept(null); }
         });
+    }
+
+    private boolean gone() { return isFinishing() || isDestroyed(); }
+
+    /** Item 8: every dialog is shown only while this Activity is alive (a reply or a scan can arrive after it). */
+    private AlertDialog.Builder dialog() {
+        return new AlertDialog.Builder(this) {
+            @Override public AlertDialog show() { return gone() ? create() : super.show(); }
+        };
     }
 
     /** The vendor's own listing for a shop (imported with ⇪), or null. */
@@ -1243,7 +1320,7 @@ public class MainActivity extends AppCompatActivity {
         if (auto) {   // an automatic failure is notified once per line, not at every block (as Pandamonium)
             if (!"1".equals(db.getMeta("notified:" + key, ""))) { db.setMeta("notified:" + key, "1"); notifyDelivery(o.ref, false, msg); }
         }
-        else new AlertDialog.Builder(this).setTitle("NFT not sent").setMessage(msg).setPositiveButton("OK", null).show();   // whole ids: a dialog, not a toast
+        else dialog().setTitle("NFT not sent").setMessage(msg).setPositiveButton("OK", null).show();   // whole ids: a dialog, not a toast
         refreshOrderIfTopmost(o.ref);
     }
 
@@ -1497,10 +1574,10 @@ public class MainActivity extends AppCompatActivity {
         }), WATCH_INTERVAL_MS);
     }
 
-    private View replyRow(final MerchDb.Order o) {
+    private View replyRow(final MerchDb.Order o, List<String[]> chat) {
         LinearLayout wrap = new LinearLayout(this);
         wrap.setOrientation(LinearLayout.VERTICAL);
-        for (String[] c : db.chat(o.ref)) {
+        for (String[] c : chat) {
             boolean incoming = "1".equals(c[0]);
             TextView t = new TextView(this);
             t.setText((incoming ? "Buyer: " : "You: ") + c[1]);
@@ -1607,7 +1684,7 @@ public class MainActivity extends AppCompatActivity {
         TextView val = new TextView(this);
         val.setText(card); val.setTextColor(Design.DIM2); val.setTextSize(10f);
         val.setPadding(0, dp(10), 0, 0); col.addView(val);
-        new AlertDialog.Builder(this).setTitle("Vendor Card").setView(wrapScroll(col))
+        dialog().setTitle("Vendor Card").setView(wrapScroll(col))
                 .setPositiveButton("Copy", (d, w) -> copy(card))
                 .setNegativeButton("Close", null).show();
     }

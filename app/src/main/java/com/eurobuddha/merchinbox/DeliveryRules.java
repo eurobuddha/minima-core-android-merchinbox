@@ -100,6 +100,7 @@ final class DeliveryRules {
     static final class Verdict {
         final List<String> reasons = new ArrayList<>();
         String product = "", token = "", listing = "";
+        MerchDb.Order order;          // the fresh order row the check used (its buyer address is the recipient)
         BigDecimal qty = BigDecimal.ZERO, stock = BigDecimal.ZERO, held, due, paid = BigDecimal.ZERO;
     }
 
@@ -127,6 +128,7 @@ final class DeliveryRules {
     static Verdict reasons(Inputs in) {
         Verdict v = new Verdict();
         MerchDb.Order o = in.order;
+        v.order = o;
         String[] line = in.line;
         if (o == null || line == null || line.length < 5) { v.reasons.add("the order or the line could not be read"); return v; }
         String name = line[0], tokenid = line[1];
