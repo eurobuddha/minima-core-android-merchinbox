@@ -399,6 +399,7 @@ public class MainActivity extends AppCompatActivity {
     private void useListing(final JSONObject listing, final boolean signed) {
         io.execute(() -> {
             String shopId = listing.optString("shopId");
+            try { listing.put("confirmedAt", System.currentTimeMillis()); } catch (org.json.JSONException ignored) {}   // its id when unsigned (item 2)
             db.setMeta("listing:" + shopId, listing.toString());
             db.setMeta("listingsigned:" + shopId, signed ? "1" : "0");   // shown on every order of this shop
             int checked = 0;
@@ -933,7 +934,7 @@ public class MainActivity extends AppCompatActivity {
             if (!v.reasons.isEmpty()) { deliverFailed(o, key, "Not sent:\n• " + String.join("\n• ", v.reasons), auto); return; }
             io.execute(() -> {
                 final String why = !db.getMeta("nftsent:" + key, "").isEmpty() ? "this line was already sent"
-                        : DeliveryLedger.reserve(db.getWritableDatabase(), ledgerKey(o.ref, line), v.product, v.token, v.qty, v.stock, v.held);
+                        : DeliveryLedger.reserve(db.getWritableDatabase(), ledgerKey(o.ref, line), v.product, v.token, v.qty, v.stock, v.held, v.listing);
                 final MerchDb.Order now = db.order(o.ref);   // the fresh row the checks used: its buyer address
                 ui.post(() -> {
                     if (why != null) { deliverFailed(o, key, "Not sent: " + why, auto); return; }
@@ -979,8 +980,8 @@ public class MainActivity extends AppCompatActivity {
             DeliveryRules.Verdict v = DeliveryRules.reasons(in);
             if (!v.product.isEmpty()) {
                 String tokenPrefix = v.product.substring(0, v.product.lastIndexOf('|', v.product.lastIndexOf('|') - 1) + 1);   // shop|token|
-                in.delivered = DeliveryLedger.delivered(w, v.product); in.inflight = DeliveryLedger.inflight(w, tokenid);
-                in.deliveredOfToken = DeliveryLedger.deliveredOfToken(w, tokenPrefix); in.bundleTaken = DeliveryLedger.bundleTaken(w, tokenPrefix);
+                in.delivered = DeliveryLedger.delivered(w, v.product, v.listing); in.inflight = DeliveryLedger.inflight(w, tokenid);
+                in.deliveredOfToken = DeliveryLedger.deliveredOfToken(w, tokenPrefix, v.listing); in.bundleTaken = DeliveryLedger.bundleTaken(w, tokenPrefix, v.listing);
                 v = DeliveryRules.reasons(in);
             }
             final DeliveryRules.Verdict out = v;

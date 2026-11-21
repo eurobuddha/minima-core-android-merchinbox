@@ -248,4 +248,20 @@ public class DrainTest {
         send(r, false);
         assertEquals("never counted", 1, sends.size());
     }
+
+    /** Point release item 2: Studio exports a product's stock as what the vendor holds; after a re-export, the
+     *  deliveries under the earlier listing are already out of that holding and do not count again. */
+    @Test public void aReExportedListingCountsOnlyItsOwnDeliveries() throws Exception {
+        android.database.sqlite.SQLiteDatabase w = db.getWritableDatabase();
+        String p = "art|" + ART.toLowerCase(java.util.Locale.ROOT) + "|0|0";
+        java.math.BigDecimal one = java.math.BigDecimal.ONE, five = java.math.BigDecimal.valueOf(5), ten = java.math.BigDecimal.TEN;
+        for (int k = 0; k < 5; k++) { assertNull(DeliveryLedger.reserve(w, "ORD-OLD" + k + "|0", p, ART, one, five, ten, "s1")); DeliveryLedger.mark(w, "ORD-OLD" + k + "|0", DeliveryLedger.SENT); }
+        assertNotNull("the first listing's stock is used up", DeliveryLedger.reserve(w, "ORD-OLD5|0", p, ART, one, five, ten, "s1"));
+        db.setMeta("ledger:ORD-LEGACY|0", new JSONObject().put("product", p).put("token", ART).put("qty", "3").put("state", "sent").toString());   // before 0.5.32
+        assertNull("the re-exported listing starts from its own stock", DeliveryLedger.reserve(w, "ORD-NEW|0", p, ART, one, five, ten, "s2"));
+        assertEquals(0, one.compareTo(DeliveryLedger.delivered(w, p, "s2")));
+        assertEquals("in flight still counts across listings", 0, one.compareTo(DeliveryLedger.inflight(w, ART)));
+        assertEquals("s5", Listing.id(new JSONObject().put("signedAt", 5)));
+        assertEquals("c7", Listing.id(new JSONObject().put("confirmedAt", 7)));
+    }
 }

@@ -99,7 +99,7 @@ final class DeliveryRules {
 
     static final class Verdict {
         final List<String> reasons = new ArrayList<>();
-        String product = "", token = "";
+        String product = "", token = "", listing = "";
         BigDecimal qty = BigDecimal.ZERO, stock = BigDecimal.ZERO, held, due, paid = BigDecimal.ZERO;
     }
 
@@ -128,6 +128,7 @@ final class DeliveryRules {
             Listing.Check c = Listing.check(in.listing, o);
             v.reasons.addAll(c.problems);
             try { v.due = new BigDecimal(c.due); } catch (NumberFormatException e) { v.due = BigDecimal.ZERO; }
+            v.listing = Listing.id(in.listing);
             int idx; try { idx = Integer.parseInt(line[3]); } catch (NumberFormatException e) { idx = -1; }
             JSONObject p = Listing.product(in.listing, name, tokenid, idx, bundle ? 1 : 0);
             if (p == null) v.reasons.add("\"" + name + "\" (token " + tokenid + ") is not one product in your listing");

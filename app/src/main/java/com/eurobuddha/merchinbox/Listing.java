@@ -88,6 +88,15 @@ final class Listing {
         return cap(s == null ? "" : s.replaceAll("[\\p{Cc}\\p{Zl}\\p{Zp}\\u200E\\u200F\\u202A-\\u202E\\u2066-\\u2069]", " "), 60);
     }
 
+    /** Which listing this is, for the delivery ledger (point release item 2): when it was signed, else when the
+     *  vendor confirmed it; "" for a listing stored before either was kept. */
+    static String id(JSONObject listing) {
+        if (listing == null) return "";
+        if (listing.optLong("signedAt", 0) > 0) return "s" + listing.optLong("signedAt");
+        if (listing.optLong("confirmedAt", 0) > 0) return "c" + listing.optLong("confirmedAt");
+        return "";
+    }
+
     /** Every product of a compact listing (name, token id whole, price, stock) and its delivery fees, and how it
      *  differs from the current one (null = none), for the vendor to read before "Use this listing". */
     static String summary(JSONObject next, JSONObject current) {
