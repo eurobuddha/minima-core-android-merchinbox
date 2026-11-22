@@ -895,7 +895,10 @@ public class MainActivity extends AppCompatActivity {
                 TextView cf = label("Another order arrived with this reference (a reference is public once paid), so nothing is sent for it while it is contested. "
                         + "A payment counts only for the order whose secret it commits to; the other orders with this reference are listed below.");
                 cf.setTextColor(Design.RED); body.addView(cf);
-            } else if (m.nonce.isEmpty()) body.addView(label("This order came from an older Shop without a payment secret: its payment is matched by its reference only."));
+            } else if (m.nonce.isEmpty()) {   // every order with no secret, NFT lines or not (r3 I5): the facts as stored
+                body.addView(label("This order came from an older Shop without a payment secret: its payment is matched by its reference only."));
+                oldShopFacts(body, DeliveryRules.oldShopFacts(parseBlock(m.orderBlock), m.paid), m.paid, o.coinid);
+            }
             if (m.legacyPaid) {   // M2 a: paid under an older Inbox that kept no coin list
                 TextView lg = label("This order was paid under an older Inbox, which did not keep its payment coins, so nothing is sent for it until they are found. "
                         + ("none".equals(m.findResult) ? "They were not found at your address: the payment may have been spent before it was confirmed here, or it is older than your node keeps. Check your wallet history for it by hand."
@@ -940,7 +943,6 @@ public class MainActivity extends AppCompatActivity {
                 if (byHand) {
                     TextView bh = label("This order came from an older Shop: it is matched to its payment by its reference only, and a reference can be copied from a payment. It is never sent automatically; check it, confirm with the buyer and send by hand.");
                     bh.setTextColor(Design.RED); body.addView(bh);
-                    oldShopFacts(body, DeliveryRules.oldShopFacts(parseBlock(m.orderBlock), m.paid), m.paid, o.coinid);
                 }
                 for (String[] line : nfts) body.addView(nftSendRow(m, o, line));
             }
@@ -951,7 +953,7 @@ public class MainActivity extends AppCompatActivity {
         // status actions (orders only — an enquiry has no lifecycle)
         if (!inquiry) {
             body.addView(sectionLabel("Update status"));
-            body.addView(statusButtons(o));
+            body.addView(statusButtons(m, o));
         }
 
         // reply / conversation
@@ -963,12 +965,12 @@ public class MainActivity extends AppCompatActivity {
     static long parseBlock(String b) { try { return Long.parseLong(b); } catch (NumberFormatException e) { return 0; } }
 
     /** An older Shop's order, as stored (DeliveryRules.oldShopFacts): its own coin and block, each coin counted for it with
-     *  its block (whole, one tap to copy), then a red line when the order was mined after its earliest payment, or a
-     *  softer one when both are in the same block. Nothing but the generic sentence when a block is unknown. */
+     *  its block (whole, one tap to copy; "?" for a block not known), then a red line when the order was mined after its
+     *  earliest payment, or a softer one when both are in the same block; neither when a block is unknown. */
     private void oldShopFacts(LinearLayout into, DeliveryRules.OldShopFacts f, List<DeliveryRules.PaidCoin> coins, String orderCoin) {
+        if (!orderCoin.isEmpty()) into.addView(copyRow("Order coin (block " + (f.orderBlock > 0 ? String.valueOf(f.orderBlock) : "?") + ")", orderCoin, orderCoin));
+        if (coins != null) for (DeliveryRules.PaidCoin c : coins) into.addView(copyRow("Payment coin (block " + (c.created > 0 ? String.valueOf(c.created) : "?") + ")", c.shown, c.shown));
         if (!f.facts) return;
-        if (!orderCoin.isEmpty()) into.addView(copyRow("Order coin (block " + f.orderBlock + ")", orderCoin, orderCoin));
-        for (DeliveryRules.PaidCoin c : coins) into.addView(copyRow("Payment coin (block " + (c.created > 0 ? String.valueOf(c.created) : "?") + ")", c.shown, c.shown));
         if (f.after > 0) {
             TextView t = label("This order was mined " + f.after + " block(s) AFTER its payment (the order at block " + f.orderBlock + ", the payment at block " + f.earliest
                     + "): an honest Shop sends the order first.");
@@ -1052,7 +1054,7 @@ public class MainActivity extends AppCompatActivity {
         }
     }
 
-    private View statusButtons(final MerchDb.Order o) {
+    private View statusButtons(final OrderModel m, final MerchDb.Order o) {
         LinearLayout wrap = new LinearLayout(this);
         wrap.setOrientation(LinearLayout.VERTICAL);
         LinearLayout actionRow = null;
@@ -1063,7 +1065,11 @@ public class MainActivity extends AppCompatActivity {
             TextView b = button(s, s.equals(o.status));
             LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
             lp.rightMargin = dp(6); b.setLayoutParams(lp);
-            b.setOnClickListener(v -> advanceStatus(o, s));
+            // r3 I5: confirming or shipping an order with no secret needs the Send confirmation's warning accepted first
+            if (!DeliveryRules.autoAllowed(m.nonce) && (MerchDb.CONFIRMED.equals(s) || MerchDb.SHIPPED.equals(s)))
+                b.setOnClickListener(v -> dialog().setTitle("Mark this order " + s + "?").setView(wrapScroll(oldShopSendFacts(m, o, null)))
+                        .setPositiveButton("Mark " + s, (d, w) -> advanceStatus(o, s)).setNegativeButton("Cancel", null).show());
+            else b.setOnClickListener(v -> advanceStatus(o, s));
             actionRow.addView(b);
         }
         return wrap;
