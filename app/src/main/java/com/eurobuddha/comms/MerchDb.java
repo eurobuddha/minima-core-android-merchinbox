@@ -130,7 +130,19 @@ public class MerchDb extends SQLiteOpenHelper implements CommsScanner.MetaStore 
                 // commitment), never flagged by its arrival alone; one with no secret is ignored. Stored order with no
                 // secret (an older Shop): the ref is flagged as before, and the newcomer is kept beside it.
                 Order old = order(m.ref);
-                if (old != null && (!eq(old.counterparty, m.from) || !eq(old.items, m.items) || !eq(old.payaddr, m.buyerPayaddr))) {
+                if (old != null && orderBlock > 0 && eq(old.counterparty, m.from) && eq(old.items, m.items) && eq(old.payaddr, m.buyerPayaddr)
+                        && eq(getMeta("nonce:" + m.ref, ""), MerchMessage.validNonce(m.nonce) ? m.nonce : "")) {
+                    // The same order re-sent by its own signer (r3 I7): the earliest copy's coin and block are the order's,
+                    // whichever copy was read first (pages are newest first). Never moved by another sender.
+                    long had = 0; try { had = Long.parseLong(getMeta("orderblock:" + m.ref, "0")); } catch (NumberFormatException ignored) {}
+                    if (had <= 0 || orderBlock < had) {
+                        ContentValues f = new ContentValues(); f.put("k", "orderblock:" + m.ref); f.put("v", String.valueOf(orderBlock));
+                        db.insertWithOnConflict(META, null, f, SQLiteDatabase.CONFLICT_REPLACE);
+                        ContentValues c = new ContentValues(); c.put("coinid", coinid);
+                        db.update(ORD, c, "ref=?", new String[]{m.ref});
+                    }
+                }
+                else if (old != null && (!eq(old.counterparty, m.from) || !eq(old.items, m.items) || !eq(old.payaddr, m.buyerPayaddr))) {
                     String oldNonce = getMeta("nonce:" + m.ref, "");
                     boolean secret = MerchMessage.validNonce(m.nonce) && !m.nonce.equalsIgnoreCase(oldNonce);
                     if (oldNonce.isEmpty()) {
