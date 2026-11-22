@@ -53,6 +53,7 @@ public class OrderingTest extends DrainTest {
     }
     void deliverCoin(JSONObject c) throws Exception {
         payments.add(c);
+        set("chainBlock", (int) tip); db.setMeta(MainActivity.ORDERS_TIP, String.valueOf(tip));   // judged: its block + 3 is read
         call("routePayment", new Class<?>[]{String.class, Opened.class, JSONObject.class}, c.getString("coinid"), null, c);
     }
 

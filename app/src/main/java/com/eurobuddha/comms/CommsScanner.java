@@ -38,6 +38,8 @@ public final class CommsScanner {
     private static final int START_DEPTH = 4;          // every scan's FIRST query is this small + safe
     private static final int MAX_DEPTH = 64;           // grow no deeper than this in one pass
     private static final long MIN_INTERVAL_MS = 4000;  // throttle: don't hammer the node on bursts
+    /** A scanner that follows another ({@link #follows}) reads this many blocks more than its gap on every pass. */
+    static final int REREAD_MARGIN = 8;
 
     private final NodeApi node;
     private final CryptoProvider crypto;
@@ -47,6 +49,8 @@ public final class CommsScanner {
     private final Listener listener;
     private final boolean decrypt;              // true: open state[99]; false: hand every coin raw (payments)
     private final String bmBackfilled, bmTip;   // address-namespaced bookmark keys
+    private String leadTip;                      // follows(): the bookmark of the scan this one runs after
+    private int passTip;                         // what this pass's bookmark will say, once it is read whole
 
     private boolean running = false;
     private boolean tracked = false;
@@ -69,23 +73,44 @@ public final class CommsScanner {
         this.decrypt = decrypt;
         String tag = targetAddress.length() > 10 ? targetAddress.substring(2, 10) : targetAddress;
         this.bmBackfilled = "backfilled_" + (decrypt ? "" : "pay_") + tag;
-        this.bmTip = "scanned_tip_" + (decrypt ? "" : "pay_") + tag;
+        this.bmTip = tipKey(targetAddress, decrypt);
     }
 
-    public void scan(final int chainBlock) {
-        if (running) return;
-        if (System.currentTimeMillis() - lastScanEnd < MIN_INTERVAL_MS) return;   // throttle
+    /** The key of a scanner's tip bookmark: the chain tip its last whole pass read up to. */
+    public static String tipKey(String targetAddress, boolean decrypt) {
+        return "scanned_tip_" + (decrypt ? "" : "pay_") + (targetAddress.length() > 10 ? targetAddress.substring(2, 10) : targetAddress);
+    }
+
+    /** The Inbox's payment scanner runs after the orders scan of every pass, and a payment coin is judged only once the
+     *  tip and that scan's bookmark ({@code leadTipKey}) have reached its block + 3 (MainActivity.routePayment). So this
+     *  scanner's bookmark never passes the lead's, every pass reads its gap plus {@link #REREAD_MARGIN} blocks (a coin
+     *  left waiting is read again until it is judged), and it has no throttle of its own (the scan it follows has). */
+    public void follows(String leadTipKey) { leadTip = leadTipKey; }
+
+    /** How many blocks a pass reads back from the tip: the gap since the bookmark (all of {@link #MAX_DEPTH} on a first
+     *  pass or with no tip), plus the margin for a scanner that follows another; never more than MAX_DEPTH. */
+    static int targetDepth(boolean backfill, int chainBlock, int scannedTip, boolean follows) {
+        if (backfill || chainBlock <= 0) return MAX_DEPTH;
+        int gap = Math.max(1, chainBlock - scannedTip + 1);
+        return Math.min(MAX_DEPTH, follows ? gap + REREAD_MARGIN : gap);
+    }
+
+    /** Starts a pass; false when it did not start (a pass is running, or the throttle). */
+    public boolean scan(final int chainBlock) {
+        if (running) return false;
+        if (leadTip == null && System.currentTimeMillis() - lastScanEnd < MIN_INTERVAL_MS) return false;   // throttle
         running = true; grew = false; newThisRun = 0; seenCoins.clear();
         boolean backfillRun = meta.getMeta(bmBackfilled, "").isEmpty();
         int scannedTip = parseInt(meta.getMeta(bmTip, "0"));
-        int gap = (chainBlock > 0) ? Math.max(1, chainBlock - scannedTip + 1) : MAX_DEPTH;
-        targetDepth = Math.min(MAX_DEPTH, backfillRun ? MAX_DEPTH : gap);
+        targetDepth = targetDepth(backfillRun, chainBlock, scannedTip, leadTip != null);
+        passTip = leadTip == null ? chainBlock : Math.min(chainBlock, parseInt(meta.getMeta(leadTip, "0")));
         depth = Math.min(START_DEPTH, targetDepth);    // ALWAYS start small — never an unbounded query
-        if (tracked) { fetch(chainBlock); return; }
+        if (tracked) { fetch(chainBlock); return true; }
         node.cmd("coinnotify action:add address:" + targetAddress, new NodeApi.Cb() {
             @Override public void onResult(JSONObject j) { tracked = true; fetch(chainBlock); }
             @Override public void onError(String m) { fetch(chainBlock); }
         });
+        return true;
     }
 
     private void fetch(final int chainBlock) {
@@ -115,7 +140,7 @@ public final class CommsScanner {
 
     private void finish(int chainBlock, boolean ok) {
         if (ok) meta.setMeta(bmBackfilled, "true");
-        if (chainBlock > 0) meta.setMeta(bmTip, String.valueOf(chainBlock));
+        if (ok && passTip > 0) meta.setMeta(bmTip, String.valueOf(passTip));   // a failed read moves nothing: read again next pass
         running = false; lastScanEnd = System.currentTimeMillis();
         listener.onDone(ok, newThisRun);
     }

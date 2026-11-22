@@ -148,7 +148,7 @@ public class MainActivity extends AppCompatActivity {
             @Override public void onReceive(Context c, Intent i) {
                 try {
                     String event = new JSONObject(MinimaAPI.notifyData(i)).optString("event", "");
-                    if ("NEWBLOCK".equals(event) || "NEWBALANCE".equals(event)) { fetchBlock(); requestScan(); }
+                    if ("NEWBLOCK".equals(event) || "NEWBALANCE".equals(event)) fetchBlock(MainActivity.this::requestScan);   // the pass reads the new tip
                 } catch (Exception ignored) {}
             }
         };
@@ -203,9 +203,9 @@ public class MainActivity extends AppCompatActivity {
         paired = enabled;
         pairingBanner.setVisibility(enabled ? View.GONE : View.VISIBLE);
         if (enabled) {
-            if (chainBlock == 0) fetchBlock();
+            fetchBlock(crypto == null ? null : this::requestScan);
             fetchVendorAddr();
-            if (crypto == null) setupIdentity(); else requestScan();
+            if (crypto == null) setupIdentity();
         }
     }
 
@@ -229,7 +229,9 @@ public class MainActivity extends AppCompatActivity {
         });
     }
 
-    private void fetchBlock() {
+    /** Reads the chain tip, then runs {@code then} (null = nothing): a scan pass judges payments against the tip it read,
+     *  never one block stale. */
+    private void fetchBlock(final Runnable then) {
         node.cmd("block", new NodeApi.Cb() {
             @Override public void onResult(JSONObject j) {
                 if (gone()) return;
@@ -237,8 +239,9 @@ public class MainActivity extends AppCompatActivity {
                 int was = chainBlock;
                 if (r != null) try { chainBlock = Integer.parseInt(r.optString("block", "0")); } catch (Exception ignored) {}
                 if (chainBlock > was) confirmSweep(chainBlock);   // once per new block
+                if (then != null) then.run();
             }
-            @Override public void onError(String m) {}
+            @Override public void onError(String m) { if (then != null && !gone()) then.run(); }
         });
     }
 
@@ -305,8 +308,13 @@ public class MainActivity extends AppCompatActivity {
         identity = id;
         crypto = new LocalEcCryptoProvider(ls, id);
         myId = id.publicId();
+        // Orders first, then payments, in every pass (2026-11-22): the payment scan starts when the orders scan ends, and
+        // its coins are stored on io after the orders and their bookmark (one io thread, in order).
         orderScanner = new CommsScanner(node, crypto, orderQueue, CommsTransport.MINIMERCH_ADDRESS,
-                orderQueue.route(this::routeIncoming), (ok, n) -> io.execute(() -> onScanDone(routedNew.getAndSet(0))));
+                orderQueue.route(this::routeIncoming), (ok, n) -> {
+                    io.execute(() -> onScanDone(routedNew.getAndSet(0)));
+                    if (paymentScanner != null) paymentScanner.scan(chainBlock);
+                });
         if (!vendorAddr.isEmpty()) startPaymentScanner();
     }
 
@@ -318,7 +326,12 @@ public class MainActivity extends AppCompatActivity {
                     // auto-send that failed last session, or a payment that landed while closed).
                     if (ok) ui.post(() -> { if (!autoSweepDone) { autoSweepDone = true; autoDeliverSweep(); } });
                 }), false);
+        paymentScanner.follows(ORDERS_TIP);   // its bookmark never passes the orders read; every pass re-reads what waits
     }
+
+    /** The orders scanner's bookmark: every order mined up to this block was read and stored. */
+    static final String ORDERS_TIP = CommsScanner.tipKey(CommsTransport.MINIMERCH_ADDRESS, true);
+    long ordersTip() { try { return Long.parseLong(db.getMeta(ORDERS_TIP, "0")); } catch (NumberFormatException e) { return 0; } }
 
     private void askForSeed() {
         final EditText in = input("Your Minima seed phrase");
@@ -335,10 +348,15 @@ public class MainActivity extends AppCompatActivity {
 
     // ---- scanning + routing ----
 
+    private boolean rescanPosted;
+
+    /** One pass: orders, then payments (started when the orders scan ends). A request dropped because a pass is running
+     *  or ended under 4 s ago is tried again once, so a new block is not left unread until the next event. */
     private void requestScan() {
-        if (crypto == null) return;
-        if (orderScanner != null) orderScanner.scan(chainBlock);
-        if (paymentScanner != null) paymentScanner.scan(chainBlock);
+        if (crypto == null || orderScanner == null) return;
+        if (orderScanner.scan(chainBlock) || rescanPosted) return;
+        rescanPosted = true;
+        ui.postDelayed(() -> { rescanPosted = false; if (!gone()) requestScan(); }, 4500);
     }
 
     /** An opened MINIMERCH message: orders/inquiries land as orders; buyer replies append to the order chat. */
@@ -377,12 +395,13 @@ public class MainActivity extends AppCompatActivity {
         if (refHex == null) return false;
         String ref = DeliveryRules.text(refHex);   // strict: hex of valid UTF-8 only (delta review L-f)
         if (!MerchMessage.validRef(ref)) return false;
+        long created = coin.optLong("created", 0);
+        if (!DeliveryRules.judgeable(created, chainBlock, ordersTip())) return false;   // not judged yet: a later pass reads it again
         MerchDb.Order o = db.order(ref);
         if (o == null || o.paid) return false;   // PAID locks; any other coin is counted once (recordPayment keeps its id)
         db.dues = this::contenderDue;   // another kept order's coins flag the ref only once they reach its listed due (M-A)
         String amount = MerchDb.coinAmount(coin);   // a token coin's tokenamount, never the Minima amount backing it
         String tokenid = coin.optString("tokenid", "0x00");
-        long created = coin.optLong("created", 0);
         String result = db.recordPayment(ref, coinid, amount, tokenid, CommsScanner.statePort(coin, 2), created);
         // M2 c: read by the scanner already at the minimum confirmations: confirmed now, so spending it later is fine
         if (result != null && created > 0 && chainBlock > 0 && chainBlock - created + 1 >= minConf())

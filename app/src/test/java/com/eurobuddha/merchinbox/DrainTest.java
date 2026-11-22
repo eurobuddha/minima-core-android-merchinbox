@@ -105,6 +105,7 @@ public class DrainTest {
                         .put(new JSONObject().put("name", "Art").put("price", "1").put("maxUnits", 5).put("nftTokenId", ART)))
                 .put("shipping", new JSONArray().put(new JSONObject().put("id", "digital").put("fee", "0")));
         db.setMeta("listing:art", Listing.compact(listing.toString(), ME).toString());
+        db.setMeta(MainActivity.ORDERS_TIP, String.valueOf(tip));   // every order up to the tip was read (payments are judged against it)
     }
     @After public void close() { db.close(); activity.finish(); }
 
@@ -388,6 +389,7 @@ public class DrainTest {
         payments.add(new JSONObject().put("coinid", "0xE5").put("tokenid", "0x00").put("amount", "10").put("tokenamount", "10").put("created", String.valueOf(tip - 5))
                 .put("state", new JSONArray().put(new JSONObject().put("port", 1).put("data", "0x" + hex("ORD-SCAN")))));
         Queued q = new Queued(); set("io", q);
+        set("chainBlock", (int) tip);
         call("startPaymentScanner", new Class<?>[]{});
         Field ps = MainActivity.class.getDeclaredField("paymentScanner"); ps.setAccessible(true);
         ((com.eurobuddha.comms.CommsScanner) ps.get(activity)).scan((int) tip);
