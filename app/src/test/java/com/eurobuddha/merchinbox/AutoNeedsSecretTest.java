@@ -34,6 +34,19 @@ public class AutoNeedsSecretTest extends DrainTest {
         assertEquals("the vendor's own Send still works", 1, sends.size());
     }
 
+    /** r3 I6: sendNft itself refuses an automatic send of an order with no secret, whoever calls it, and releases the
+     *  line; the vendor's own Send of the same line then goes through. */
+    @Test public void anAutomaticSendOfANoSecretOrderIsRefusedInSendNftItself() throws Exception {
+        MerchDb.Order o = order("ORD-OLDSHOP2", "Piece", NFT, 1, "10");
+        pay("ORD-OLDSHOP2", "10", tip - 5, "0xB3");
+        send(db.order("ORD-OLDSHOP2"), true);
+        assertTrue("never automatic: " + sends, sends.isEmpty());
+        java.lang.reflect.Field f = MainActivity.class.getDeclaredField("nftSending"); f.setAccessible(true);
+        assertTrue("the line is released", ((java.util.Collection<?>) f.get(activity)).isEmpty());
+        send(o, false);
+        assertEquals("the vendor's own Send still works", 1, sends.size());
+    }
+
     @Test public void anOrderWithASecretIsStillSentAutomatically() throws Exception {
         db.setMeta("autosend", "1");
         String n = MerchMessage.newNonce();

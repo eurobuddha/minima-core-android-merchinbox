@@ -1247,6 +1247,7 @@ public class MainActivity extends AppCompatActivity {
         if (!nftSending.add(key)) return;   // one check-and-send per line at a time
         checkDelivery(o.ref, line, v -> {
             if (auto && DeliveryRules.onlyWaiting(v.reasons)) { nftSending.remove(key); return; }   // confirmations to come: waiting, never a failure
+            if (auto && !DeliveryRules.autoAllowed(v.nonce)) { nftSending.remove(key); return; }   // no secret: only the vendor's own Send, whoever calls (r3 I6)
             if (!v.reasons.isEmpty()) { deliverFailed(o, key, "Not sent:\n• " + String.join("\n• ", v.reasons), auto); return; }
             io.execute(() -> {
                 final String why = !db.getMeta("nftsent:" + key, "").isEmpty() ? "this line was already sent"
