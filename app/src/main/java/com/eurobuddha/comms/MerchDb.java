@@ -90,7 +90,11 @@ public class MerchDb extends SQLiteOpenHelper implements CommsScanner.MetaStore 
      *  it states: the row holds the currency's token ("" when the currency is not payable), and an ORDER whose stated
      *  token id disagrees, or whose currency is not payable, is kept with a mismatch flag ({@link #mismatch}) that
      *  lives apart from the status, so no status change can make it deliverable. */
-    public boolean upsertOrder(MerchMessage m, String role, String coinid) {
+    public boolean upsertOrder(MerchMessage m, String role, String coinid) { return upsertOrder(m, role, coinid, 0); }
+
+    /** As above, with the block of the coin that carried the order (0 = unknown), kept with a new row in the same
+     *  transaction ("orderblock:"), so it is there before any payment is judged against it. */
+    public boolean upsertOrder(MerchMessage m, String role, String coinid, long orderBlock) {
         String want = MerchMessage.tokenFor(m.currency);
         boolean mismatch = MerchMessage.ORDER.equals(m.type) && MerchMessage.tokenProblem(m.currency, m.tokenid) != null;
         ContentValues v = new ContentValues();
@@ -110,6 +114,10 @@ public class MerchDb extends SQLiteOpenHelper implements CommsScanner.MetaStore 
             long id = db.insertWithOnConflict(ORD, null, v, SQLiteDatabase.CONFLICT_IGNORE);
             if (id != -1 && mismatch) {   // only with the row it belongs to: a later message with the same ref changes nothing
                 ContentValues f = new ContentValues(); f.put("k", "mismatch:" + m.ref); f.put("v", "1");
+                db.insertWithOnConflict(META, null, f, SQLiteDatabase.CONFLICT_REPLACE);
+            }
+            if (id != -1 && orderBlock > 0) {   // when the order reached the chain: bounds the payment read (L-a) and P3
+                ContentValues f = new ContentValues(); f.put("k", "orderblock:" + m.ref); f.put("v", String.valueOf(orderBlock));
                 db.insertWithOnConflict(META, null, f, SQLiteDatabase.CONFLICT_REPLACE);
             }
             if (id != -1 && MerchMessage.validNonce(m.nonce)) {   // the order's secret, kept with the row it came with
@@ -218,6 +226,19 @@ public class MerchDb extends SQLiteOpenHelper implements CommsScanner.MetaStore 
             else if (cc.isEmpty() && !n.isEmpty()) unassignedPayment(ref, coinid, paidAmount, paidTokenid, created);   // L-B
             return null;
         }
+        // An order with no secret is not paid by a coin mined more than 3 blocks before it (2026-11-22): its reference is
+        // plain text on chain, so an order made from an older payment's reference may be a copy. The coin is kept for the
+        // vendor to see (counted for no order) with one note per order; judged again, it changes nothing.
+        long ob;
+        try { ob = Long.parseLong(getMeta("orderblock:" + ref, "0")); } catch (NumberFormatException e) { ob = 0; }
+        if (n.isEmpty() && olderThanOrder(created, ob)) {
+            unassignedPayment(ref, coinid, paidAmount, paidTokenid, created);
+            if (getMeta("olderpay:" + ref, "").isEmpty()) {
+                try { setMeta("olderpay:" + ref, new org.json.JSONObject().put("coinid", coinid).put("created", created).put("orderblock", ob).toString()); }
+                catch (org.json.JSONException ignored) {}
+            }
+            return null;
+        }
         String want = MerchMessage.tokenFor(o.currency);
         boolean tokenOk = want != null && want.equalsIgnoreCase(paidTokenid);
         boolean started = want != null && want.equalsIgnoreCase(o.paidTokenid);   // right-token coins already counted
@@ -257,6 +278,20 @@ public class MerchDb extends SQLiteOpenHelper implements CommsScanner.MetaStore 
             db.setTransactionSuccessful();
         } finally { db.endTransaction(); }
         return result;
+    }
+
+    /** How many blocks before its order a payment may be mined and still pay an order with no secret (as the desktop). */
+    public static final int PAY_BEFORE_ORDER = 3;
+
+    /** A coin of known block mined more than PAY_BEFORE_ORDER blocks before the order's own block (orders stored with no
+     *  block, by older versions, are judged as before). */
+    public static boolean olderThanOrder(long created, long orderBlock) {
+        return created > 0 && orderBlock > 0 && created < orderBlock - PAY_BEFORE_ORDER;
+    }
+
+    /** The first coin older than this no-secret order that carried its reference: {coinid, created, orderblock}, or null. */
+    public org.json.JSONObject olderPayment(String ref) {
+        try { String v = getMeta("olderpay:" + ref, ""); return v.isEmpty() ? null : new org.json.JSONObject(v); } catch (org.json.JSONException e) { return null; }
     }
 
     /** What is due for an order: the total the Inbox recomputed from the vendor's own listing ("due:" meta),

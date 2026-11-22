@@ -366,8 +366,7 @@ public class MainActivity extends AppCompatActivity {
         if (!myId.equals(m.to)) return false;                                  // addressed to me
         if (!MerchMessage.validRef(m.ref)) return false;                       // an empty or odd ref is never stored (C1)
         if (MerchMessage.ORDER.equals(m.type)) {
-            boolean fresh = db.upsertOrder(m, "seller", coinid);
-            if (fresh && coin != null && coin.optLong("created", 0) > 0) db.setMeta("orderblock:" + m.ref, String.valueOf(coin.optLong("created")));   // bounds the payment read (L-a)
+            boolean fresh = db.upsertOrder(m, "seller", coinid, coin == null ? 0 : coin.optLong("created", 0));   // with its block, in one transaction
             if (!fresh && coin != null && coin.optLong("created", 0) > 0 && coinid != null)   // another order with a stored ref: when it came (m2)
                 db.setMeta("contenderblock:" + m.ref + ":" + coinid.toLowerCase(java.util.Locale.ROOT), String.valueOf(coin.optLong("created")));
             if (fresh) recheck(db.order(m.ref));   // what is due, from the vendor's own listing
@@ -729,6 +728,7 @@ public class MainActivity extends AppCompatActivity {
         String ref; MerchDb.Order o;
         boolean mismatch, conflict, upgraded, listing, autoOn, contendedFull, cameFirst, legacyPaid;
         String findResult = "";
+        JSONObject olderPay;
         String nonce = "", listingSigned = "", problems = "", due = "", orderBlock = "";
         boolean checked;
         List<String[]> nfts = new ArrayList<>();
@@ -760,6 +760,7 @@ public class MainActivity extends AppCompatActivity {
         m.cameFirst = m.conflict && m.nonce.isEmpty() && o.paid && recordCameFirst(o);
         m.legacyPaid = legacyPaid(o);
         m.findResult = db.getMeta("findpayment:" + ref, "");
+        m.olderPay = db.olderPayment(ref);
         m.orderBlock = db.getMeta("orderblock:" + ref, "");
         m.chat = db.chat(ref);
         return m;
@@ -842,6 +843,12 @@ public class MainActivity extends AppCompatActivity {
             if (m.upgraded) {
                 TextView up = label("Upgraded: re-check this order's payment. It was recorded by an older Inbox, and nothing is sent until its coins are read back on chain.");
                 up.setTextColor(Design.RED); body.addView(up);
+            }
+            if (m.olderPay != null) {   // a payment older than this no-secret order: not counted, checked by hand (tap: the whole coin id)
+                final String coin = m.olderPay.optString("coinid");
+                TextView op = label("A payment with this order's reference is older than the order (payment coin " + coin + " at block " + m.olderPay.optString("created")
+                        + ", the order at block " + m.olderPay.optString("orderblock") + "): check by hand. It is not counted for this order.");
+                op.setTextColor(Design.RED); op.setOnClickListener(v -> copy(coin)); body.addView(op);
             }
             if (m.listing) body.addView(label(listingInUse(m.listingSigned)));
             String problems = m.problems;

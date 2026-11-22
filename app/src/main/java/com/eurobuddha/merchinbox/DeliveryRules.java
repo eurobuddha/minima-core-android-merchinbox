@@ -116,7 +116,7 @@ final class DeliveryRules {
     }
 
     /** How many blocks after a payment coin its order may still be mined and be read before the coin is judged. */
-    static final int PAY_WAIT = 3;
+    static final int PAY_WAIT = MerchDb.PAY_BEFORE_ORDER;
 
     /** A payment coin is judged (matched to the order with its reference) only once the chain tip AND the orders read
      *  (the orders scanner's bookmark, from a whole read) have reached its block + 3, so every order mined up to 3 blocks
