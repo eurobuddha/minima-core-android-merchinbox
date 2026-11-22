@@ -166,6 +166,31 @@ public class CommsScannerTipMovesTest {
         noSilentHole(m, 100, seen);
     }
 
+    /** Final review (phone): a held pass (every page read, tip not confirmed) cannot prove it read down to the refused
+     *  blocks: it keeps their record and the count. Here the tip moves 5 blocks during its pages, so 101 is never read;
+     *  refused and held passes in turn still reach the stall line (5 in a row). */
+    @Test public void aHeldPassKeepsTheRefusedBlocksAndTheCount() {
+        Map<String, String> m = start(100); Set<Long> seen = new TreeSet<>();
+        Node node = new Node(); node.tip = 105; node.refuse.add(101L);
+        assertFalse(pass(node, m, 105, seen));
+        assertEquals("101 105", m.get("refusedblocks_pay_12121212"));
+        assertEquals("1", m.get("failedpasses_pay_12121212"));
+        node.refuse.clear(); node.tip = 106; node.calls = 0; node.onceAfterFirst = 5; node.blockFails = 99;
+        assertFalse(pass(node, m, 106, seen));
+        assertFalse("101 was not read", seen.contains(101L));
+        assertEquals("100", m.get(BM));
+        assertEquals("101 105", m.get("refusedblocks_pay_12121212"));
+        assertEquals("1", m.get("failedpasses_pay_12121212"));
+        for (int p = 0; p < 8; p++) {
+            boolean refused = p % 2 == 0;
+            node.refuse.clear(); if (refused) node.refuse.add(101L);
+            node.calls = 0; node.onceAfterFirst = refused ? 0 : 5; node.blockFails = refused ? 0 : 99;
+            assertFalse(pass(node, m, (int) ++node.tip, seen));
+        }
+        assertEquals("5", m.get("failedpasses_pay_12121212"));
+        assertFalse(m.getOrDefault("refusedblocks_pay_12121212", "").isEmpty());
+    }
+
     /** The orders scan reads its gap only (orders are stored idempotently; the tip read again covers a tip that moved). */
     @Test public void theOrdersScanReadsItsGapOnly() {
         Map<String, String> m = new HashMap<>(); m.put("backfilled_4D494E49", "true"); m.put("scanned_tip_4D494E49", "95");

@@ -221,8 +221,8 @@ public final class CommsScanner {
 
     private void finish(int chainBlock, boolean ok) { finish(chainBlock, ok, false); }
 
-    /** {@code held}: every page was read but the tip could not be confirmed; the bookmark stays and it is not counted (a
-     *  window that reached below the refused blocks clears them: what the refused passes left was read). */
+    /** {@code held}: every page was read but the tip could not be confirmed; the bookmark stays and it is not counted,
+     *  and it keeps the count and the refused blocks as they were (it cannot prove it read down to them). */
     private void finish(int chainBlock, boolean ok, boolean held) {
         // Blocks this pass did not reach (a gap over the window) that no earlier pass read whole: the payment scan's
         // bookmark stays at the orders read while each pass reads 64 back, so its own read-whole mark says what it read
@@ -238,7 +238,7 @@ public final class CommsScanner {
             else { if (a > from) note(from, a - 1, ""); note(a, b, REFUSED); if (b < bottom) note(b + 1, bottom, ""); }
         }
         if (ok && chainBlock > whole) meta.setMeta(bmWhole, String.valueOf(chainBlock));
-        boolean clear = ok || held && hi >= 0 && bottom <= lo;   // every page over the refused blocks was read: nothing left to report
+        boolean clear = ok;   // every page over the refused blocks was read: nothing left to report
         if (clear ? fails > 0 : chainBlock > 0 && !held) meta.setMeta(bmFails, String.valueOf(clear ? 0 : fails + 1));
         if (clear && hi >= 0) meta.setMeta(bmRefused, "");
         if (!ok && !held && chainBlock > 0)   // what this pass tried and did not all read: from its lowest unread block to its top
