@@ -29,7 +29,7 @@ public class AutoNeedsSecretTest extends DrainTest {
         ShadowLooper.idleMainLooper();
         assertTrue("never automatic: " + sends, sends.isEmpty());
         String all = String.join("\n", InboxShowsIdentifiersWholeTest.texts((android.view.View) call("buildOrderDetail", new Class<?>[]{String.class}, "ORD-OLDSHOP")));
-        assertTrue(all, all.contains("does not prove which payment is its own") && all.contains("send by hand"));
+        assertTrue(all, all.contains("is matched to its payment by its reference only") && all.contains("send by hand"));
         send(o, false);
         assertEquals("the vendor's own Send still works", 1, sends.size());
     }
@@ -43,6 +43,6 @@ public class AutoNeedsSecretTest extends DrainTest {
         ShadowLooper.idleMainLooper();
         assertEquals(1, sends.size());
         String all = String.join("\n", InboxShowsIdentifiersWholeTest.texts((android.view.View) call("buildOrderDetail", new Class<?>[]{String.class}, "ORD-NEWSHOP")));
-        assertFalse(all, all.contains("does not prove which payment is its own"));
+        assertFalse(all, all.contains("is matched to its payment by its reference only"));
     }
 }

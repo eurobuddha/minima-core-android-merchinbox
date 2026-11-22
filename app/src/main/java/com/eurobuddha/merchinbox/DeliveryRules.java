@@ -102,6 +102,8 @@ final class DeliveryRules {
         final List<String> reasons = new ArrayList<>();
         String product = "", token = "", listing = "";
         MerchDb.Order order;          // the fresh order row the check used (its buyer address is the recipient)
+        String nonce = "";            // its secret, as the check read it ("" = an older Shop)
+        List<PaidCoin> coins;         // the coins counted for it, as settled by the check
         BigDecimal qty = BigDecimal.ZERO, stock = BigDecimal.ZERO, held, due, paid = BigDecimal.ZERO;
     }
 
@@ -121,6 +123,21 @@ final class DeliveryRules {
      *  the vendor's own Send, where every rule here still applies. */
     static boolean autoAllowed(String nonce) { return nonce != null && !nonce.isEmpty(); }
 
+    /** What an order with no secret shows at the vendor's Send and on its order screen (2026-11-22), decided from the facts
+     *  as stored: {@code facts} when the order's own block and the block of a coin counted for it are known (otherwise the
+     *  generic paragraph only); then {@code after} &gt; 0 when the order was mined that many blocks after its earliest
+     *  payment (a red line: an honest Shop sends the order first), or {@code sameBlock} (a softer note). */
+    static final class OldShopFacts { boolean facts, sameBlock; long orderBlock, earliest, after; }
+
+    static OldShopFacts oldShopFacts(long orderBlock, List<PaidCoin> paid) {
+        OldShopFacts f = new OldShopFacts();
+        f.orderBlock = orderBlock;
+        if (paid != null) for (PaidCoin c : paid) if (c.created > 0 && (f.earliest == 0 || c.created < f.earliest)) f.earliest = c.created;
+        f.facts = orderBlock > 0 && f.earliest > 0;
+        if (f.facts) { f.sameBlock = orderBlock == f.earliest; f.after = Math.max(0, orderBlock - f.earliest); }
+        return f;
+    }
+
     /** Point release item 6: an older-Shop order (no secret) flagged by a stranger's order with its copied ref may be
      *  delivered to the order of record when the evidence says it came first: its order coin's block is earlier than
      *  the block of every coin counted for it (so it existed before its ref was public), and no other order's coins
@@ -139,7 +156,7 @@ final class DeliveryRules {
     static Verdict reasons(Inputs in) {
         Verdict v = new Verdict();
         MerchDb.Order o = in.order;
-        v.order = o;
+        v.order = o; v.nonce = in.nonce == null ? "" : in.nonce; v.coins = in.paid;
         String[] line = in.line;
         if (o == null || line == null || line.length < 5) { v.reasons.add("the order or the line could not be read"); return v; }
         String name = line[0], tokenid = line[1];
