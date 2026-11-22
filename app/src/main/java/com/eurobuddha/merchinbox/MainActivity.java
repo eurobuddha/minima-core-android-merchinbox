@@ -922,7 +922,7 @@ public class MainActivity extends AppCompatActivity {
                     + (m.firstPay == null ? "" : String.valueOf(m.firstPay.created)) + "; every other order with this reference is in a later block than that payment (the coins are below). "
                     + "That does not prove this order is the buyer's: a payment's reference can be read while the payment waits to be mined, so a copy made from it can be mined before it. "
                     + "Confirm with the buyer before you send."));
-            if (m.firstPay != null) body.addView(copyRow("Earliest payment coin (block " + m.firstPay.created + ")", m.firstPay.coinid, m.firstPay.coinid));
+            if (m.firstPay != null) body.addView(copyRow("Earliest payment coin (block " + m.firstPay.created + ")", m.firstPay.shown, m.firstPay.shown));
             for (String[] x : m.otherOrders) body.addView(copyRow("Other order's coin (block " + x[1] + ")", x[0], x[0]));
             TextView keep = button("Deliver to the order of record (" + o.payaddr + ")", false);
             keep.setOnClickListener(v -> dialog().setTitle("Deliver to the order of record?")
@@ -1356,7 +1356,9 @@ public class MainActivity extends AppCompatActivity {
             if (id.isEmpty() || !seen.add(id)) continue;
             String owner = db.getMeta("paycoin:" + id, "");
             if (!owner.isEmpty() && !owner.equals(ref)) continue;   // counted for another order: never here
-            out.add(new DeliveryRules.PaidCoin(id, x.optString("amount", null), x.optString("tokenid", null), x.optLong("created", 0)));
+            DeliveryRules.PaidCoin c = new DeliveryRules.PaidCoin(id, x.optString("amount", null), x.optString("tokenid", null), x.optLong("created", 0));
+            c.shown = x.optString("coinid");   // shown as the node gave it; compared and read lower-cased
+            out.add(c);
         }
         try (android.database.Cursor q = db.getReadableDatabase().rawQuery("SELECT k FROM meta WHERE k LIKE 'paycoin:%' AND v=?", new String[]{ref})) {
             while (q.moveToNext()) {

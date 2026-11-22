@@ -27,10 +27,23 @@ public class CameFirstWordingTest extends Poc2Test {
         assertFalse(all, all.contains("before its reference was public") || all.contains("made the reference public"));
         assertTrue(all, all.contains("in block " + (tip - 8) + " and the earliest payment counted for it is in block " + (tip - 5)));
         assertTrue(all, all.contains("a copy made from it can be mined before it") && all.contains("Confirm with the buyer"));
-        assertTrue(all, all.contains("Earliest payment coin (block " + (tip - 5) + ")") && all.contains(PAY_COIN.toLowerCase(java.util.Locale.ROOT)));
+        assertTrue(all, all.contains("Earliest payment coin (block " + (tip - 5) + ")") && all.contains(PAY_COIN));
+        assertFalse("shown as the node gave it, like every other row", all.contains(PAY_COIN.toLowerCase(java.util.Locale.ROOT)));
         assertTrue(all, all.contains("Other order's coin (block " + (tip - 2) + ")") && all.contains(OTHER_COIN));
         String help = MainActivity.DELIVER_TO_RECORD_HELP;
         assertFalse(help, help.contains("made the reference public"));
         assertTrue(help, help.contains("can still be a copy made from the payment while it waited to be mined") && help.contains("confirm with the buyer"));
+    }
+
+    /** A counted coin's id in the reasons of a check (shown under its Send button) is as the node gave it too. */
+    @Test public void aCheckNamesACoinAsTheNodeGaveIt() throws Exception {
+        call("routeIncoming", new Class<?>[]{String.class, Opened.class, JSONObject.class}, ORDER_COIN, opened(msg("0xBUYER", BUYER, "", "Piece", "10")),
+                new JSONObject().put("coinid", ORDER_COIN).put("created", tip - 8));
+        payments.add(coin(PAY_COIN, null).put("created", String.valueOf(tip)));
+        db.recordPayment(REF, PAY_COIN, "10", "0x00", null, tip);   // 1 confirmation: the check waits
+        send(db.order(REF), false);
+        String all = String.join("\n", InboxShowsIdentifiersWholeTest.texts((android.view.View) call("buildOrderDetail", new Class<?>[]{String.class}, REF)));
+        assertTrue(all, all.contains(PAY_COIN + " has 1 confirmation(s)"));
+        assertFalse(all, all.contains(PAY_COIN.toLowerCase(java.util.Locale.ROOT)));
     }
 }

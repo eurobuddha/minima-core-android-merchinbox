@@ -45,7 +45,8 @@ final class DeliveryRules {
     static final class PaidCoin {
         static final String CONFIRMED = "CONFIRMED", WAITING = "WAITING", GONE = "GONE", UNREAD = "UNREAD";
         final String coinid; String amount, tokenid; long created; String state = UNREAD;
-        PaidCoin(String coinid, String amount, String tokenid, long created) { this.coinid = coinid; this.amount = amount; this.tokenid = tokenid; this.created = created; }
+        String shown;   // the id as the node gave it, for the screen (coinid may be lower-cased for comparing and reading)
+        PaidCoin(String coinid, String amount, String tokenid, long created) { this.coinid = coinid; this.shown = coinid; this.amount = amount; this.tokenid = tokenid; this.created = created; }
     }
 
     /** Settles one coin from its read by id ({@code coins coinid:}, null = no answer): it must still be the order's
@@ -204,18 +205,18 @@ final class DeliveryRules {
                 case PaidCoin.CONFIRMED:
                     try { v.paid = v.paid.add(new BigDecimal(c.amount)); }
                     catch (RuntimeException unreadable) {   // never silently 0: said, logged, not counted (M2 b)
-                        v.reasons.add("coin " + c.coinid + ": its amount could not be read, so it is not counted");
-                        android.util.Log.w("miniMallInbox", "coin " + c.coinid + " amount unreadable: " + c.amount, unreadable);
+                        v.reasons.add("coin " + c.shown + ": its amount could not be read, so it is not counted");
+                        android.util.Log.w("miniMallInbox", "coin " + c.shown + " amount unreadable: " + c.amount, unreadable);
                     }
                     break;
                 case PaidCoin.WAITING:
-                    v.reasons.add("coin " + c.coinid + " has " + Math.max(0, in.tip - c.created + 1) + " confirmation(s); " + in.minConf + " are needed");
+                    v.reasons.add("coin " + c.shown + " has " + Math.max(0, in.tip - c.created + 1) + " confirmation(s); " + in.minConf + " are needed");
                     break;
                 case PaidCoin.GONE:
-                    v.reasons.add("coin " + c.coinid + " is not on chain any more and never reached " + in.minConf + " confirmation(s)");
+                    v.reasons.add("coin " + c.shown + " is not on chain any more and never reached " + in.minConf + " confirmation(s)");
                     break;
                 default:
-                    v.reasons.add("coin " + c.coinid + " could not be read");
+                    v.reasons.add("coin " + c.shown + " could not be read");
             }
         }
         if (v.due == null || v.due.signum() <= 0 || v.paid.compareTo(v.due) < 0)
