@@ -12,7 +12,9 @@ import java.util.Set;
  * SAFETY (unchanged from the Mail scanner): a large `coins` reply can take the node down (IPC Binder /
  * 256 KB limits). So this NEVER issues an unbounded query — it always bounds with `depth:`, starts TINY
  * (depth 4), grows only while replies come back safely, probes smaller on an over-limit/dropped reply,
- * and is throttled so block bursts can't hammer the node.
+ * and is throttled so block bursts can't hammer the node. A deeper page refused after a smaller one was read is
+ * read in older windows (`coinage:`, halved while refused, as the Inbox's "Find this order's payment" does); the
+ * bookmark moves only when the whole range was read (2026-11-22).
  *
  * Generalized for miniMall: the target address + the per-coin handling are injected, so one instance can
  * scan the shared MINIMERCH address (inbox: incoming orders; shop: status/chat) while a {@link Router}
@@ -51,6 +53,10 @@ public final class CommsScanner {
     private final String bmBackfilled, bmTip;   // address-namespaced bookmark keys
     private String leadTip;                      // follows(): the bookmark of the scan this one runs after
     private int passTip;                         // what this pass's bookmark will say, once it is read whole
+    private int startTip;                        // the bookmark this pass started from
+    private boolean backfillRun;
+    private int read;                            // blocks read back from the tip this pass, whole
+    private boolean paging;                      // a deeper page was refused: the rest is read in older windows
 
     private boolean running = false;
     private boolean tracked = false;
@@ -81,6 +87,14 @@ public final class CommsScanner {
         return "scanned_tip_" + (decrypt ? "" : "pay_") + (targetAddress.length() > 10 ? targetAddress.substring(2, 10) : targetAddress);
     }
 
+    /** The prefix of the blocks a scanner's bookmark moved past unread ({@code <prefix><first block>} = last block):
+     *  a gap wider than {@link #MAX_DEPTH} (the Inbox was closed, or a block the node never served stayed in the window
+     *  until it left it). The Inbox shows them; they are never claimed as read. */
+    public static final String UNREAD = "unread_";
+    public static String unreadKey(String targetAddress, boolean decrypt) {
+        return UNREAD + (decrypt ? "" : "pay_") + (targetAddress.length() > 10 ? targetAddress.substring(2, 10) : targetAddress) + ":";
+    }
+
     /** The Inbox's payment scanner runs after the orders scan of every pass and judges a coin the first time it sees it
      *  (MainActivity.routePayment). A coin whose order is not stored yet is not recorded, so this scanner's bookmark never
      *  passes the lead's ({@code leadTipKey}) and every pass reads its gap plus {@link #REREAD_MARGIN} blocks: such a coin
@@ -100,9 +114,10 @@ public final class CommsScanner {
     public boolean scan(final int chainBlock) {
         if (running) return false;
         if (leadTip == null && System.currentTimeMillis() - lastScanEnd < MIN_INTERVAL_MS) return false;   // throttle
-        running = true; grew = false; newThisRun = 0; seenCoins.clear();
-        boolean backfillRun = meta.getMeta(bmBackfilled, "").isEmpty();
+        running = true; grew = false; newThisRun = 0; seenCoins.clear(); read = 0; paging = false;
+        backfillRun = meta.getMeta(bmBackfilled, "").isEmpty();
         int scannedTip = parseInt(meta.getMeta(bmTip, "0"));
+        startTip = scannedTip;
         targetDepth = targetDepth(backfillRun, chainBlock, scannedTip, leadTip != null);
         passTip = leadTip == null ? chainBlock : Math.min(chainBlock, parseInt(meta.getMeta(leadTip, "0")));
         depth = Math.min(START_DEPTH, targetDepth);    // ALWAYS start small — never an unbounded query
@@ -116,14 +131,19 @@ public final class CommsScanner {
 
     private void fetch(final int chainBlock) {
         // ALWAYS bounded by depth — never an unbounded `coins` (a huge reply can crash the node).
-        String cmd = "coins address:" + targetAddress + " order:desc depth:" + depth;
+        String cmd = "coins address:" + targetAddress + " order:desc depth:" + depth + (paging ? " coinage:" + read : "");
         node.cmd(cmd, new NodeApi.Cb() {
             @Override public void onResult(JSONObject j) {
                 JSONArray coins = j.optJSONArray("response");
                 if (coins == null || !j.optBoolean("status", true)) { overLimit(chainBlock); return; }
                 grew = true;
                 newThisRun += process(coins);
-                if (depth < targetDepth) { depth = Math.min(depth * 2, targetDepth); fetch(chainBlock); }  // grow while safe
+                int window = depth - read;
+                read = depth;                              // every block from the tip down to this depth is read
+                if (read < targetDepth) {                  // grow while safe; an older window keeps the size that was served
+                    depth = paging ? Math.min(read + window, targetDepth) : Math.min(depth * 2, targetDepth);
+                    fetch(chainBlock);
+                }
                 else finish(chainBlock, true);
             }
             @Override public void onError(String message) {
@@ -133,15 +153,28 @@ public final class CommsScanner {
         });
     }
 
-    /** A page came back dropped/refused. Probe smaller if we've not safely read anything yet; else stop. */
+    /** A page came back dropped/refused. Probe smaller if we've not safely read anything yet; once a page was read, read
+     *  the rest in older windows, halved while refused. A single block refused ends the pass partly read: the bookmark
+     *  stays and the next pass reads the range again (a block the node never serves leaves the 64-block window as the
+     *  tip moves on, and the bookmark then moves past it with an unread note, never silently). */
     private void overLimit(int chainBlock) {
-        if (!grew && depth > 1) { depth = Math.max(1, depth / 2); fetch(chainBlock); }
-        else finish(chainBlock, grew);
+        if (!grew) {
+            if (depth > 1) { depth = Math.max(1, depth / 2); fetch(chainBlock); }
+            else finish(chainBlock, false);
+            return;
+        }
+        int half = (depth - read) / 2;
+        if (half >= 1) { paging = true; depth = read + half; fetch(chainBlock); }
+        else finish(chainBlock, false);
     }
 
     private void finish(int chainBlock, boolean ok) {
+        if (ok && !backfillRun && startTip > 0) {   // blocks the bookmark moves past that this pass did not reach (a gap over the window)
+            int to = Math.min(passTip, chainBlock - targetDepth - 1);
+            if (to > startTip) meta.setMeta(unreadKey(targetAddress, decrypt) + (startTip + 1), String.valueOf(to));
+        }
         if (ok) meta.setMeta(bmBackfilled, "true");
-        if (ok && passTip > 0) meta.setMeta(bmTip, String.valueOf(passTip));   // a failed read moves nothing: read again next pass
+        if (ok && passTip > 0) meta.setMeta(bmTip, String.valueOf(passTip));   // a failed or partial read moves nothing: read again next pass
         running = false; lastScanEnd = System.currentTimeMillis();
         listener.onDone(ok, newThisRun);
     }
