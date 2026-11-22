@@ -434,7 +434,7 @@ public class MainActivity extends AppCompatActivity {
                 for (String r : refs) maybeAutoDeliver(r);
             }
             if (autoDeliverOn() && chainBlock > sweptBlock) { sweptBlock = chainBlock; autoDeliverSweep(); }   // once per block, not per scanner callback
-            if (newCount <= 0) { if (restall) refreshVisibleOrderOrList(); return; }
+            if (newCount <= 0) { if (restall && stack.size() == 1) refreshVisibleOrderOrList(); return; }   // the line is on the list only: an open order keeps its scroll
             notifyNew(newCount);
             refreshVisibleOrderOrList();
         });

@@ -2,6 +2,7 @@ package com.eurobuddha.merchinbox;
 
 import static org.junit.Assert.*;
 
+import com.eurobuddha.comms.MerchDb;
 import org.junit.Test;
 import org.robolectric.shadows.ShadowLooper;
 
@@ -46,5 +47,23 @@ public class StalledOrdersTest extends DrainTest {
         db.setMeta(REFUSED, "107 120");
         call("showOrders", new Class<?>[]{}); ShadowLooper.idleMainLooper();
         assertTrue(shown(), shown().contains("Orders have not been read since block 107: the node refused the reads."));
+    }
+
+    /** Final review F3: while only the stalled line changes, an open order screen is not rebuilt (its scroll is kept);
+     *  the list is drawn again once it is on top. */
+    @Test public void theStalledLineAloneDoesNotRebuildAnOpenOrder() throws Exception {
+        set("container", new android.widget.FrameLayout(activity));
+        set("chainBlock", 120);
+        call("showOrders", new Class<?>[]{}); ShadowLooper.idleMainLooper();
+        MerchDb.Order o = order("ORD-F3", "Piece", NFT, 1, "10");
+        android.view.View screen = (android.view.View) call("buildOrderDetail", new Class<?>[]{String.class}, o.ref);
+        call("push", new Class<?>[]{android.view.View.class}, screen);
+        db.setMeta(FAILS, "5"); db.setMeta(REFUSED, "101 120");
+        call("onScanDone", new Class<?>[]{int.class}, 0); ShadowLooper.idleMainLooper();
+        java.lang.reflect.Field st = MainActivity.class.getDeclaredField("stack"); st.setAccessible(true);
+        assertSame("the order screen is the same view", screen, ((java.util.ArrayDeque<?>) st.get(activity)).peek());
+        call("pop", new Class<?>[]{});
+        call("onScanDone", new Class<?>[]{int.class}, 0); ShadowLooper.idleMainLooper();
+        assertTrue("back on the list, the line comes: " + shown(), shown().contains("Orders have not been read since block 101"));
     }
 }
