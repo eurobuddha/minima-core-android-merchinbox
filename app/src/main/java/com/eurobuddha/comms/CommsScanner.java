@@ -54,6 +54,7 @@ public final class CommsScanner {
     private final Listener listener;
     private final boolean decrypt;              // true: open state[99]; false: hand every coin raw (payments)
     private final String bmBackfilled, bmTip;   // address-namespaced bookmark keys
+    private final String bmWhole;               // every block up to it was read whole or noted unread (r3 I2)
     private String leadTip;                      // follows(): the bookmark of the scan this one runs after
     private int passTip;                         // what this pass's bookmark will say, once it is read whole
     private int startTip;                        // the bookmark this pass started from
@@ -85,6 +86,7 @@ public final class CommsScanner {
         String tag = targetAddress.length() > 10 ? targetAddress.substring(2, 10) : targetAddress;
         this.bmBackfilled = "backfilled_" + (decrypt ? "" : "pay_") + tag;
         this.bmTip = tipKey(targetAddress, decrypt);
+        this.bmWhole = "readwhole_" + (decrypt ? "" : "pay_") + tag;
     }
 
     /** The key of a scanner's tip bookmark: the chain tip its last whole pass read up to. */
@@ -92,7 +94,7 @@ public final class CommsScanner {
         return "scanned_tip_" + (decrypt ? "" : "pay_") + (targetAddress.length() > 10 ? targetAddress.substring(2, 10) : targetAddress);
     }
 
-    /** The prefix of the blocks a scanner's bookmark moved past unread ({@code <prefix><first block>} = last block):
+    /** The prefix of the blocks a scanner did not read and will not read ({@code <prefix><first block>} = last block):
      *  a gap wider than {@link #MAX_DEPTH} (the Inbox was closed, or a block the node never served stayed in the window
      *  until it left it). The Inbox shows them; they are never claimed as read. */
     public static final String UNREAD = "unread_";
@@ -194,10 +196,13 @@ public final class CommsScanner {
     }
 
     private void finish(int chainBlock, boolean ok) {
-        if (ok && !backfillRun && startTip > 0 && bottom - 1 > startTip) {   // blocks the bookmark moves past that this pass did not reach
-            int to = Math.min(passTip, bottom);   // a gap over the window; the lowest block read is named too: never fewer
-            if (to > startTip) meta.setMeta(unreadKey(targetAddress, decrypt) + (startTip + 1), String.valueOf(to));
-        }
+        // Blocks this pass did not reach (a gap over the window) that no earlier pass read whole: the payment scan's
+        // bookmark stays at the orders read while each pass reads 64 back, so its own read-whole mark says what it read
+        // (r3 I2), and a block it can never read again is noted at once. The lowest block read is named too: never fewer.
+        int whole = parseInt(meta.getMeta(bmWhole, "0"));
+        int from = Math.max(startTip, whole) + 1;
+        if (ok && !backfillRun && startTip > 0 && bottom - 1 >= from) meta.setMeta(unreadKey(targetAddress, decrypt) + from, String.valueOf(bottom));
+        if (ok && chainBlock > whole) meta.setMeta(bmWhole, String.valueOf(chainBlock));
         if (ok) meta.setMeta(bmBackfilled, "true");
         if (ok && passTip > 0) meta.setMeta(bmTip, String.valueOf(passTip));   // a failed or partial read moves nothing: read again next pass
         running = false; lastScanEnd = System.currentTimeMillis();

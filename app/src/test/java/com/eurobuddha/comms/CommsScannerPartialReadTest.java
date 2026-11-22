@@ -80,8 +80,9 @@ public class CommsScannerPartialReadTest {
         assertEquals("blocks 101 to 235 were never read (the pass read 236 to 300), and 236 is named too", "236", m.get("unread_4D494E49:101"));
     }
 
-    /** The payment scanner follows the orders read: only what its own bookmark moves past is noted. */
-    @Test public void aFollowerNotesOnlyWhatItsBookmarkPasses() {
+    /** The payment scanner follows the orders read, but notes every block it did not read and will not read (r3 I2),
+     *  past its bookmark too: each later pass reads only 64 back. */
+    @Test public void aFollowerNotesWhatItWillNotRead() {
         Map<String, String> m = new HashMap<>();
         String pay = "0x" + "12".repeat(32);
         m.put("backfilled_pay_12121212", "true"); m.put("scanned_tip_pay_12121212", "100"); m.put("scanned_tip_4D494E49", "150");
@@ -89,6 +90,6 @@ public class CommsScannerPartialReadTest {
         s.follows("scanned_tip_4D494E49");
         s.scan(300);
         assertEquals("150", m.get("scanned_tip_pay_12121212"));
-        assertEquals("150", m.get("unread_pay_12121212:101"));
+        assertEquals("236", m.get("unread_pay_12121212:101"));
     }
 }
