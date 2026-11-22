@@ -729,6 +729,8 @@ public class MainActivity extends AppCompatActivity {
         boolean mismatch, conflict, upgraded, listing, autoOn, contendedFull, cameFirst, legacyPaid;
         String findResult = "";
         JSONObject olderPay;
+        DeliveryRules.PaidCoin firstPay;                     // cameFirst: the earliest payment coin counted for the order
+        List<String[]> otherOrders = new ArrayList<>();      // cameFirst: each other order's {coin id, block}
         String nonce = "", listingSigned = "", problems = "", due = "", orderBlock = "";
         boolean checked;
         List<String[]> nfts = new ArrayList<>();
@@ -758,6 +760,13 @@ public class MainActivity extends AppCompatActivity {
         m.contenders = db.contenders(ref); m.unassigned = db.unassignedCoins(ref);
         m.committed = db.committedContender(o); m.contendedFull = db.contendedCoinsFull(ref);
         m.cameFirst = m.conflict && m.nonce.isEmpty() && o.paid && recordCameFirst(o);
+        if (m.cameFirst) {   // what is known, shown whole (P4): the blocks and the coins they come from
+            for (DeliveryRules.PaidCoin c : paidCoins(ref)) if (c.created > 0 && (m.firstPay == null || c.created < m.firstPay.created)) m.firstPay = c;
+            for (int i = 0; i < m.contenders.length(); i++) {
+                String id = m.contenders.optJSONObject(i) == null ? "" : m.contenders.optJSONObject(i).optString("coinid");
+                m.otherOrders.add(new String[]{id, db.getMeta("contenderblock:" + ref + ":" + id.toLowerCase(java.util.Locale.ROOT), "")});
+            }
+        }
         m.legacyPaid = legacyPaid(o);
         m.findResult = db.getMeta("findpayment:" + ref, "");
         m.olderPay = db.olderPayment(ref);
@@ -897,14 +906,24 @@ public class MainActivity extends AppCompatActivity {
 
     /** The other orders that arrived with this ref (delta review H-1): sender, buyer address and items whole, which one
      *  a payment commits to, and the one action the vendor has: make THAT order the order of record. */
+    static final String DELIVER_TO_RECORD_HELP = "Known: this order's coin is in an earlier block than its earliest payment, and every other order with this "
+            + "reference is in a later block than that payment. An order mined before the payment can still be a copy made from the payment while it "
+            + "waited to be mined, so confirm with the buyer before sending. Nothing else changes: every other check still applies.";
+
     private void addContenders(LinearLayout body, OrderModel m, final MerchDb.Order o) {
         JSONArray cs = m.contenders;
         JSONArray un = m.unassigned;
         if (m.cameFirst) {
-            body.addView(label("This order's own coin is in block " + m.orderBlock + ", before every payment counted for it, so it existed before its reference was public."));
+            // Only what is known (P4): an order mined before its payment can still be a copy made from the unmined payment
+            body.addView(label("This order's own coin is in block " + m.orderBlock + " and the earliest payment counted for it is in block "
+                    + (m.firstPay == null ? "" : String.valueOf(m.firstPay.created)) + "; every other order with this reference is in a later block than that payment (the coins are below). "
+                    + "That does not prove this order is the buyer's: a payment's reference can be read while the payment waits to be mined, so a copy made from it can be mined before it. "
+                    + "Confirm with the buyer before you send."));
+            if (m.firstPay != null) body.addView(copyRow("Earliest payment coin (block " + m.firstPay.created + ")", m.firstPay.coinid, m.firstPay.coinid));
+            for (String[] x : m.otherOrders) body.addView(copyRow("Other order's coin (block " + x[1] + ")", x[0], x[0]));
             TextView keep = button("Deliver to the order of record (" + o.payaddr + ")", false);
             keep.setOnClickListener(v -> dialog().setTitle("Deliver to the order of record?")
-                    .setMessage("The other order with this reference arrived after this one's payment made the reference public. Nothing else changes: every other check still applies.")
+                    .setMessage(DELIVER_TO_RECORD_HELP)
                     .setPositiveButton("Deliver to the order of record", (d, w) -> io.execute(() -> {
                         if (db.conflict(o) && recordCameFirst(db.order(o.ref))) { db.setMeta("conflict:" + o.ref, ""); db.setMeta("conflictresolved:" + o.ref, "orderblock"); }
                         ui.post(() -> refreshOrderIfTopmost(o.ref));
