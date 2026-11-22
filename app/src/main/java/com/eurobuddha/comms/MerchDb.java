@@ -145,11 +145,12 @@ public class MerchDb extends SQLiteOpenHelper implements CommsScanner.MetaStore 
                 else if (old != null && (!eq(old.counterparty, m.from) || !eq(old.items, m.items) || !eq(old.payaddr, m.buyerPayaddr))) {
                     String oldNonce = getMeta("nonce:" + m.ref, "");
                     boolean secret = MerchMessage.validNonce(m.nonce) && !m.nonce.equalsIgnoreCase(oldNonce);
-                    if (oldNonce.isEmpty()) {
+                    // shown to the vendor (L-B); the ref is flagged only by an order not kept yet: the same coin read again
+                    // after the vendor resolved the conflict does not flag it again (final review F2)
+                    if (addContender(db, m.ref, contender(m, coinid, secret ? m.nonce : "")) && oldNonce.isEmpty()) {
                         ContentValues f = new ContentValues(); f.put("k", "conflict:" + m.ref); f.put("v", "1");
                         db.insertWithOnConflict(META, null, f, SQLiteDatabase.CONFLICT_REPLACE);
                     }
-                    addContender(db, m.ref, contender(m, coinid, secret ? m.nonce : ""));   // shown to the vendor (L-B)
                 }
             }
             db.setTransactionSuccessful();
@@ -354,12 +355,13 @@ public class MerchDb extends SQLiteOpenHelper implements CommsScanner.MetaStore 
         return c;
     }
 
-    private void addContender(SQLiteDatabase db, String ref, org.json.JSONObject c) {
+    /** Keeps another order with this ref; false when the same order was kept already. */
+    private boolean addContender(SQLiteDatabase db, String ref, org.json.JSONObject c) {
         org.json.JSONArray a = contenders(ref);
         for (int i = 0; i < a.length(); i++) {
             org.json.JSONObject x = a.optJSONObject(i);
             if (x != null && x.optString("from").equals(c.optString("from")) && x.optString("items").equals(c.optString("items"))
-                    && x.optString("payaddr").equals(c.optString("payaddr")) && x.optString("nonce").equals(c.optString("nonce"))) return;
+                    && x.optString("payaddr").equals(c.optString("payaddr")) && x.optString("nonce").equals(c.optString("nonce"))) return false;
         }
         if (a.length() < MAX_CONTENDERS) {   // past 8 kept orders only the commitment is kept (L-A)
             a.put(c);
@@ -367,6 +369,7 @@ public class MerchDb extends SQLiteOpenHelper implements CommsScanner.MetaStore 
             db.insertWithOnConflict(META, null, f, SQLiteDatabase.CONFLICT_REPLACE);
         }
         otherCommit(db, ref, c.optString("commitment"));
+        return true;
     }
 
     /** Remember a kept order's commitment (its own cap, 64); past it, an overflow mark makes any commitment not of the

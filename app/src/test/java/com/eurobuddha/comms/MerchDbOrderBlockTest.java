@@ -41,4 +41,19 @@ public class MerchDbOrderBlockTest {
         assertEquals("never lowered by another sender", "101", db.getMeta("orderblock:" + REF, ""));
         assertEquals("0xC101", db.order(REF).coinid);
     }
+
+    /** Final review F2 (the reviewer's ReviewPolishConflictTest): another sender's order coin read again after the vendor
+     *  resolved the conflict ("Deliver to the order of record") does not flag the ref again; a new, different order does. */
+    @Test public void aKeptOrderReadAgainDoesNotFlagAResolvedConflict() throws Exception {
+        assertTrue(db.upsertOrder(order("0xBUYER"), "seller", "0xC100", 100));
+        MerchMessage copy = order("0xCOPIER"); copy.buyerPayaddr = "0x" + "66".repeat(32);
+        db.upsertOrder(copy, "seller", "0xC103", 103);
+        assertTrue(db.conflict(db.order(REF)));
+        db.setMeta("conflict:" + REF, ""); db.setMeta("conflictresolved:" + REF, "orderblock");   // as MainActivity's resolve
+        db.upsertOrder(copy, "seller", "0xC103", 103);   // the same coin read again (a re-read page)
+        assertFalse("re-read after the resolve", db.conflict(db.order(REF)));
+        MerchMessage other = order("0xOTHER"); other.buyerPayaddr = "0x" + "77".repeat(32);
+        db.upsertOrder(other, "seller", "0xC104", 104);
+        assertTrue("a genuinely new order with the ref flags it again", db.conflict(db.order(REF)));
+    }
 }
