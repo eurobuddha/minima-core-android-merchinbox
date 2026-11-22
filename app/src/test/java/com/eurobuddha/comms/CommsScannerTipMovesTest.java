@@ -109,6 +109,18 @@ public class CommsScannerTipMovesTest {
         noSilentHole(m, 101, seen);
     }
 
+    /** r3 I3: a range left unread because the node refused a read (block 150, until it left the window) says so; the
+     *  count of passes that ended partly read is back to 0 after the whole pass. A range of the window alone does not. */
+    @Test public void aRangeLeftByRefusedReadsSaysSo() {
+        Map<String, String> m = start(100); Set<Long> seen = new TreeSet<>();
+        Node node = new Node(); node.refuse.add(150L);
+        for (int t = 151; t <= 215; t++) { node.tip = t; pass(node, m, t, seen); }
+        assertEquals("151 refused", m.get(UNREAD + "101"));
+        assertEquals("215", m.get(BM));
+        assertEquals("0", m.get("failedpasses_pay_12121212"));
+        noSilentHole(m, 101, seen);
+    }
+
     /** The orders scan reads the margin back too (as payments): a block 5 below the bookmark is read again. */
     @Test public void theOrdersScanReadsTheMarginToo() {
         Map<String, String> m = new HashMap<>(); m.put("backfilled_4D494E49", "true"); m.put("scanned_tip_4D494E49", "95");

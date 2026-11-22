@@ -651,26 +651,39 @@ public class MainActivity extends AppCompatActivity {
         return col;
     }
 
-    /** The ranges the scans moved past unread, newest first, at most 5: {key, first block, last block, "pay" or ""}. */
+    /** The ranges the scans did not read, newest first, at most 5: {keys (space separated), first block, last block,
+     *  "pay", "" (orders) or "both", "1" when the node refused reads else ""}. Orders and payments of one range are one
+     *  line (r3 I3). */
     List<String[]> unreadRanges() {
-        List<String[]> out = new ArrayList<>();
+        java.util.LinkedHashMap<String, String[]> byRange = new java.util.LinkedHashMap<>();
         try (android.database.Cursor q = db.getReadableDatabase().rawQuery("SELECT k, v FROM meta WHERE k LIKE ? AND v <> ''", new String[]{CommsScanner.UNREAD + "%"})) {
             while (q.moveToNext()) {
-                String k = q.getString(0);
-                out.add(new String[]{k, k.substring(k.lastIndexOf(':') + 1), q.getString(1), k.startsWith(CommsScanner.UNREAD + "pay_") ? "pay" : ""});
+                String k = q.getString(0), v = q.getString(1), from = k.substring(k.lastIndexOf(':') + 1);
+                String to = v.endsWith(CommsScanner.REFUSED) ? v.substring(0, v.length() - CommsScanner.REFUSED.length()) : v;
+                String kind = k.startsWith(CommsScanner.UNREAD + "pay_") ? "pay" : "", refused = v.endsWith(CommsScanner.REFUSED) ? "1" : "";
+                String[] g = byRange.get(from + ":" + to);
+                if (g == null) byRange.put(from + ":" + to, new String[]{k, from, to, kind, refused});
+                else { g[0] += " " + k; if (!g[3].equals(kind)) g[3] = "both"; if (!refused.isEmpty()) g[4] = "1"; }
             }
         }
+        List<String[]> out = new ArrayList<>(byRange.values());
         out.sort((a, b) -> Long.compare(parseBlock(b[2]), parseBlock(a[2])));
         return out.size() > 5 ? new ArrayList<>(out.subList(0, 5)) : out;
     }
 
-    /** One unread range, in red, truthful about what was not read; a tap dismisses it. */
+    /** One unread range, in red, truthful about why it was not read (the 64-block window, or reads the node refused);
+     *  a tap deletes it. */
     private TextView unreadLine(final String[] g) {
-        TextView t = label("pay".equals(g[3])
-                ? "Payments between block " + g[1] + " and block " + g[2] + " could not be read: a payment made then may not be counted. Tap to dismiss."
-                : "Orders between block " + g[1] + " and block " + g[2] + " could not be read: an order sent then may be missing here. Tap to dismiss.");
+        String what = "pay".equals(g[3]) ? "Payments" : "both".equals(g[3]) ? "Orders and payments" : "Orders";
+        String then = "pay".equals(g[3]) ? "A payment made then may not be counted." : "both".equals(g[3]) ? "An order or payment sent then may be missing here."
+                : "An order sent then may be missing here.";
+        TextView t = label(what + " between block " + g[1] + " and block " + g[2] + ("1".equals(g[4]) ? " could not be read: the node refused the reads. "
+                : " were not read: the Inbox reads at most 64 blocks back. ") + then + " Tap to dismiss.");
         t.setTextColor(Design.RED);
-        t.setOnClickListener(v -> io.execute(() -> { db.setMeta(g[0], ""); ui.post(() -> { if (!gone()) refreshTop(buildOrders()); }); }));
+        t.setOnClickListener(v -> io.execute(() -> {
+            for (String k : g[0].split(" ")) db.getWritableDatabase().delete("meta", "k=?", new String[]{k});
+            ui.post(() -> { if (!gone()) refreshTop(buildOrders()); });
+        }));
         return t;
     }
 
