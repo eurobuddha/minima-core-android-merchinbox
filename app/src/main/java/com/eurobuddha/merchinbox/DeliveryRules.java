@@ -115,18 +115,6 @@ final class DeliveryRules {
         return waiting;
     }
 
-    /** How many blocks after a payment coin its order may still be mined and be read before the coin is judged. */
-    static final int PAY_WAIT = MerchDb.PAY_BEFORE_ORDER;
-
-    /** A payment coin is judged (matched to the order with its reference) only once the chain tip AND the orders read
-     *  (the orders scanner's bookmark, from a whole read) have reached its block + 3, so every order mined up to 3 blocks
-     *  after it is already stored: a copier's order mined in the next block meets the real one as a second order (the
-     *  reference is flagged) before anything is paid. Not one block later: the node's wallet may spend a coin 3 blocks
-     *  old, and the scan lists unspent coins only. A coin of unknown block is judged as before. */
-    static boolean judgeable(long created, long tip, long ordersTip) {
-        return created <= 0 || (tip >= created + PAY_WAIT && ordersTip >= created + PAY_WAIT);
-    }
-
     /** Automatic delivery only for an order that came with a secret (2026-11-22): an older Shop's order proves no payment
      *  is its own (its reference is plain text on chain, so anyone can put it in an order of their own), so it waits for
      *  the vendor's own Send, where every rule here still applies. */

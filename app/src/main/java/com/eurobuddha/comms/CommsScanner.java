@@ -81,10 +81,11 @@ public final class CommsScanner {
         return "scanned_tip_" + (decrypt ? "" : "pay_") + (targetAddress.length() > 10 ? targetAddress.substring(2, 10) : targetAddress);
     }
 
-    /** The Inbox's payment scanner runs after the orders scan of every pass, and a payment coin is judged only once the
-     *  tip and that scan's bookmark ({@code leadTipKey}) have reached its block + 3 (MainActivity.routePayment). So this
-     *  scanner's bookmark never passes the lead's, every pass reads its gap plus {@link #REREAD_MARGIN} blocks (a coin
-     *  left waiting is read again until it is judged), and it has no throttle of its own (the scan it follows has). */
+    /** The Inbox's payment scanner runs after the orders scan of every pass and judges a coin the first time it sees it
+     *  (MainActivity.routePayment). A coin whose order is not stored yet is not recorded, so this scanner's bookmark never
+     *  passes the lead's ({@code leadTipKey}) and every pass reads its gap plus {@link #REREAD_MARGIN} blocks: such a coin
+     *  is read again, while it is unspent, after an order mined a few blocks later is stored. It has no throttle of its
+     *  own (the scan it follows has). */
     public void follows(String leadTipKey) { leadTip = leadTipKey; }
 
     /** How many blocks a pass reads back from the tip: the gap since the bookmark (all of {@link #MAX_DEPTH} on a first

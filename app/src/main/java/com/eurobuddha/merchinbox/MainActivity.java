@@ -331,7 +331,6 @@ public class MainActivity extends AppCompatActivity {
 
     /** The orders scanner's bookmark: every order mined up to this block was read and stored. */
     static final String ORDERS_TIP = CommsScanner.tipKey(CommsTransport.MINIMERCH_ADDRESS, true);
-    long ordersTip() { try { return Long.parseLong(db.getMeta(ORDERS_TIP, "0")); } catch (NumberFormatException e) { return 0; } }
 
     private void askForSeed() {
         final EditText in = input("Your Minima seed phrase");
@@ -395,7 +394,6 @@ public class MainActivity extends AppCompatActivity {
         String ref = DeliveryRules.text(refHex);   // strict: hex of valid UTF-8 only (delta review L-f)
         if (!MerchMessage.validRef(ref)) return false;
         long created = coin.optLong("created", 0);
-        if (!DeliveryRules.judgeable(created, chainBlock, ordersTip())) return false;   // not judged yet: a later pass reads it again
         MerchDb.Order o = db.order(ref);
         if (o == null || o.paid) return false;   // PAID locks; any other coin is counted once (recordPayment keeps its id)
         db.dues = this::contenderDue;   // another kept order's coins flag the ref only once they reach its listed due (M-A)
