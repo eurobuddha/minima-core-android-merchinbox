@@ -1070,8 +1070,10 @@ public class MainActivity extends AppCompatActivity {
             TextView b = button(s, s.equals(o.status));
             LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
             lp.rightMargin = dp(6); b.setLayoutParams(lp);
-            // r3 I5: confirming or shipping an order with no secret needs the Send confirmation's warning accepted first
-            if (!DeliveryRules.autoAllowed(m.nonce) && (MerchDb.CONFIRMED.equals(s) || MerchDb.SHIPPED.equals(s)))
+            // r3 I5: confirming, shipping or delivering an order with no secret needs the Send confirmation's warning accepted
+            // first (delivering straight from PAID or CONFIRMED too; once SHIPPED the vendor has accepted it, final review F4)
+            if (!DeliveryRules.autoAllowed(m.nonce) && (MerchDb.CONFIRMED.equals(s) || MerchDb.SHIPPED.equals(s)
+                    || MerchDb.DELIVERED.equals(s) && !MerchDb.SHIPPED.equals(o.status)))
                 b.setOnClickListener(v -> dialog().setTitle("Mark this order " + s + "?").setView(wrapScroll(oldShopSendFacts(m, o, null)))
                         .setPositiveButton("Mark " + s, (d, w) -> advanceStatus(o, s)).setNegativeButton("Cancel", null).show());
             else b.setOnClickListener(v -> advanceStatus(o, s));

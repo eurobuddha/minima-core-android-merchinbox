@@ -70,4 +70,20 @@ public class OldShopStatusTest extends DrainTest {
             assertEquals(s, db.order(REF).status);
         }
     }
+
+    /** Final review F4: DELIVERED straight from PAID asks first too; once SHIPPED (the vendor accepted it then) it does not. */
+    @Test public void deliveringAsksFirstUnlessShipped() throws Exception {
+        physicalOrder(tip - 8, tip - 10);
+        String before = db.order(REF).status;
+        OldShopSendTest.find(detail(), MerchDb.DELIVERED).performClick(); ShadowLooper.idleMainLooper();
+        assertEquals("not marked before the vendor accepts", before, db.order(REF).status);
+        androidx.appcompat.app.AlertDialog d = (androidx.appcompat.app.AlertDialog) ShadowDialog.getLatestDialog();
+        assertTrue(texts(d.getWindow().getDecorView()).contains("This order came from an older Shop and is matched to its payment by its reference only."));
+        d.getButton(android.content.DialogInterface.BUTTON_POSITIVE).performClick(); ShadowLooper.idleMainLooper();
+        assertEquals(MerchDb.DELIVERED, db.order(REF).status);
+        db.setStatus(REF, MerchDb.SHIPPED);
+        d.dismiss();
+        OldShopSendTest.find(detail(), MerchDb.DELIVERED).performClick(); ShadowLooper.idleMainLooper();
+        assertEquals("from SHIPPED it is marked at once", MerchDb.DELIVERED, db.order(REF).status);
+    }
 }
