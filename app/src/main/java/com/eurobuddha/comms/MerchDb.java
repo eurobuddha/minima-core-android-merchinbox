@@ -226,18 +226,14 @@ public class MerchDb extends SQLiteOpenHelper implements CommsScanner.MetaStore 
             else if (cc.isEmpty() && !n.isEmpty()) unassignedPayment(ref, coinid, paidAmount, paidTokenid, created);   // L-B
             return null;
         }
-        // An order with no secret is not paid by a coin mined more than 3 blocks before it (2026-11-22): its reference is
-        // plain text on chain, so an order made from an older payment's reference may be a copy. The coin is kept for the
-        // vendor to see (counted for no order) with one note per order; judged again, it changes nothing.
+        // A coin mined more than 3 blocks before an order with no secret is counted for it (as 2.2.74), and the order keeps
+        // one note with the first such coin (2026-11-22): its reference is plain text on chain, so an order made from an
+        // older payment's reference may be a copy. The vendor sees the note and confirms with the buyer before sending.
         long ob;
         try { ob = Long.parseLong(getMeta("orderblock:" + ref, "0")); } catch (NumberFormatException e) { ob = 0; }
-        if (n.isEmpty() && olderThanOrder(created, ob)) {
-            unassignedPayment(ref, coinid, paidAmount, paidTokenid, created);
-            if (getMeta("olderpay:" + ref, "").isEmpty()) {
-                try { setMeta("olderpay:" + ref, new org.json.JSONObject().put("coinid", coinid).put("created", created).put("orderblock", ob).toString()); }
-                catch (org.json.JSONException ignored) {}
-            }
-            return null;
+        if (n.isEmpty() && olderThanOrder(created, ob) && getMeta("olderpay:" + ref, "").isEmpty()) {
+            try { setMeta("olderpay:" + ref, new org.json.JSONObject().put("coinid", coinid).put("created", created).put("orderblock", ob).toString()); }
+            catch (org.json.JSONException ignored) {}
         }
         String want = MerchMessage.tokenFor(o.currency);
         boolean tokenOk = want != null && want.equalsIgnoreCase(paidTokenid);
@@ -280,7 +276,7 @@ public class MerchDb extends SQLiteOpenHelper implements CommsScanner.MetaStore 
         return result;
     }
 
-    /** How many blocks before its order a payment may be mined and still pay an order with no secret (as the desktop). */
+    /** How many blocks before its order a payment may be mined before an order with no secret gets the older-payment note. */
     public static final int PAY_BEFORE_ORDER = 3;
 
     /** A coin of known block mined more than PAY_BEFORE_ORDER blocks before the order's own block (orders stored with no
@@ -289,7 +285,7 @@ public class MerchDb extends SQLiteOpenHelper implements CommsScanner.MetaStore 
         return created > 0 && orderBlock > 0 && created < orderBlock - PAY_BEFORE_ORDER;
     }
 
-    /** The first coin older than this no-secret order that carried its reference: {coinid, created, orderblock}, or null. */
+    /** The first coin older than this no-secret order that was counted for it: {coinid, created, orderblock}, or null. */
     public org.json.JSONObject olderPayment(String ref) {
         try { String v = getMeta("olderpay:" + ref, ""); return v.isEmpty() ? null : new org.json.JSONObject(v); } catch (org.json.JSONException e) { return null; }
     }

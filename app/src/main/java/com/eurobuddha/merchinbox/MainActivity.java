@@ -851,10 +851,9 @@ public class MainActivity extends AppCompatActivity {
                 TextView up = label("Upgraded: re-check this order's payment. It was recorded by an older Inbox, and nothing is sent until its coins are read back on chain.");
                 up.setTextColor(Design.RED); body.addView(up);
             }
-            if (m.olderPay != null) {   // a payment older than this no-secret order: not counted, checked by hand (tap: the whole coin id)
+            if (m.olderPay != null) {   // a payment older than this no-secret order: counted, confirmed with the buyer (tap: the whole coin id)
                 final String coin = m.olderPay.optString("coinid");
-                TextView op = label("A payment with this order's reference is older than the order (payment coin " + coin + " at block " + m.olderPay.optString("created")
-                        + ", the order at block " + m.olderPay.optString("orderblock") + "): check by hand. It is not counted for this order.");
+                TextView op = label(olderPaymentText(m.olderPay));
                 op.setTextColor(Design.RED); op.setOnClickListener(v -> copy(coin)); body.addView(op);
             }
             if (m.listing) body.addView(label(listingInUse(m.listingSigned)));
@@ -900,6 +899,12 @@ public class MainActivity extends AppCompatActivity {
         body.addView(sectionLabel(inquiry ? "Conversation" : "Message the buyer"));
         body.addView(replyRow(o, m.chat));
         return col;
+    }
+
+    /** The note of an order with no secret that a coin older than the order paid (MerchDb.olderPayment), coin id whole. */
+    static String olderPaymentText(JSONObject p) {
+        return "A payment with this order's reference is older than the order (payment coin " + p.optString("coinid") + " at block " + p.optString("created")
+                + ", the order at block " + p.optString("orderblock") + "). A copy of an order can be made from a payment's reference: confirm with the buyer before sending.";
     }
 
     /** The other orders that arrived with this ref (delta review H-1): sender, buyer address and items whole, which one
