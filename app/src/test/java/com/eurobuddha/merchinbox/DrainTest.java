@@ -112,8 +112,12 @@ public class DrainTest {
     Object call(String n, Class<?>[] t, Object... a) throws Exception { Method m = MainActivity.class.getDeclaredMethod(n, t); m.setAccessible(true); return m.invoke(activity, a); }
 
     MerchDb.Order order(String ref, String product, String token, Object qty, String unitPrice) throws Exception {
+        return order(ref, product, token, qty, unitPrice, "");
+    }
+    /** As above, from a current Shop: the order carries this secret (nonce). */
+    MerchDb.Order order(String ref, String product, String token, Object qty, String unitPrice, String nonce) throws Exception {
         MerchMessage m = new MerchMessage();
-        m.type = MerchMessage.ORDER; m.ref = ref; m.from = "0xBUYER"; m.to = ME; m.amount = "0.000000001"; m.currency = "Minima";
+        m.type = MerchMessage.ORDER; m.ref = ref; m.from = "0xBUYER"; m.to = ME; m.amount = "0.000000001"; m.currency = "Minima"; m.nonce = nonce;
         m.shopId = "art"; m.shipping = "digital"; m.buyerPayaddr = BUYER;
         JSONObject it = new JSONObject().put("product", product).put("quantity", qty).put("unitPrice", unitPrice);
         if (token != null) it.put("nftTokenId", token);
@@ -127,6 +131,14 @@ public class DrainTest {
                 .put("created", String.valueOf(created))
                 .put("state", new JSONArray().put(new JSONObject().put("port", 1).put("data", "0x" + hex(ref)))));
         db.recordPayment(ref, coinid, amount, "0x00");
+    }
+    /** A current Shop's payment: port 2 carries the commitment to the order's secret. */
+    void pay(String ref, String amount, long created, String coinid, String nonce) throws Exception {
+        String cc = MerchMessage.commitment(nonce);
+        payments.add(new JSONObject().put("coinid", coinid).put("tokenid", "0x00").put("amount", amount).put("tokenamount", amount)
+                .put("created", String.valueOf(created))
+                .put("state", new JSONArray().put(new JSONObject().put("port", 1).put("data", "0x" + hex(ref))).put(new JSONObject().put("port", 2).put("data", cc))));
+        assertEquals(MerchDb.PAID, db.recordPayment(ref, coinid, amount, "0x00", cc, 0));
     }
     static String hex(String s) { StringBuilder b = new StringBuilder(); for (byte x : s.getBytes(StandardCharsets.UTF_8)) b.append(String.format("%02x", x)); return b.toString(); }
     @SuppressWarnings("unchecked") List<String[]> lines(MerchDb.Order o) throws Exception { return (List<String[]>) call("nftLines", new Class<?>[]{MerchDb.Order.class}, o); }
@@ -213,8 +225,9 @@ public class DrainTest {
     }
 
     @Test public void automaticDeliveryIsOffByDefaultAndOnOnlyWhenSet() throws Exception {
-        MerchDb.Order o = order("ORD-AUTO", "Piece", NFT, 1, "10");
-        pay("ORD-AUTO", "10", tip - 5, "0xAA");
+        String n = MerchMessage.newNonce();   // automatic delivery is only for an order with a secret
+        MerchDb.Order o = order("ORD-AUTO", "Piece", NFT, 1, "10", n);
+        pay("ORD-AUTO", "10", tip - 5, "0xAA", n);
         db.recordPayment("ORD-AUTO", "0xAB", "10", "0x00");   // the order row says paid (the list's pre-filter)
         db.setMeta("due:ORD-AUTO", "10"); db.setMeta("listingproblem:ORD-AUTO", "");
         db.setMeta("autodeliver", "1");   // the old setting, ON by default before, is never read
@@ -285,14 +298,16 @@ public class DrainTest {
         org.robolectric.Shadows.shadowOf(RuntimeEnvironment.getApplication()).grantPermissions("android.permission.POST_NOTIFICATIONS");
         android.app.NotificationManager nm = (android.app.NotificationManager) RuntimeEnvironment.getApplication().getSystemService(android.content.Context.NOTIFICATION_SERVICE);
         db.setMeta("autosend", "1");
-        order("ORD-WAIT", "Piece", NFT, 1, "10");
-        pay("ORD-WAIT", "10", tip, "0xC1");   // 1 of 3 confirmations
+        String w = MerchMessage.newNonce();
+        order("ORD-WAIT", "Piece", NFT, 1, "10", w);
+        pay("ORD-WAIT", "10", tip, "0xC1", w);   // 1 of 3 confirmations
         call("maybeAutoDeliver", new Class<?>[]{String.class}, "ORD-WAIT");
         ShadowLooper.idleMainLooper();
         assertEquals("waiting: no notification", 0, org.robolectric.Shadows.shadowOf(nm).size());
         assertTrue(sends.isEmpty());
-        MerchDb.Order f = order("ORD-FAIL", "Art", ART, 1, "1");
-        pay("ORD-FAIL", "1", tip - 5, "0xC2");
+        String n = MerchMessage.newNonce();   // automatic delivery is only for an order with a secret
+        MerchDb.Order f = order("ORD-FAIL", "Art", ART, 1, "1", n);
+        pay("ORD-FAIL", "1", tip - 5, "0xC2", n);
         held.put(ART, "0");                    // a real failure: the vendor no longer holds the token
         call("maybeAutoDeliver", new Class<?>[]{String.class}, "ORD-FAIL");
         ShadowLooper.idleMainLooper();

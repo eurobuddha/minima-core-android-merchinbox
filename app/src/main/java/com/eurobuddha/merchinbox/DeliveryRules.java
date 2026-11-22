@@ -115,6 +115,11 @@ final class DeliveryRules {
         return waiting;
     }
 
+    /** Automatic delivery only for an order that came with a secret (2026-11-22): an older Shop's order proves no payment
+     *  is its own (its reference is plain text on chain, so anyone can put it in an order of their own), so it waits for
+     *  the vendor's own Send, where every rule here still applies. */
+    static boolean autoAllowed(String nonce) { return nonce != null && !nonce.isEmpty(); }
+
     /** Point release item 6: an older-Shop order (no secret) flagged by a stranger's order with its copied ref may be
      *  delivered to the order of record when the evidence says it came first: its order coin's block is earlier than
      *  the block of every coin counted for it (so it existed before its ref was public), and no other order's coins

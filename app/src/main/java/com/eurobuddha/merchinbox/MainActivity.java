@@ -508,6 +508,7 @@ public class MainActivity extends AppCompatActivity {
             if (!autoDeliverOn()) return;
             final MerchDb.Order o = db.order(ref);
             if (!db.deliverable(o)) return;
+            if (!DeliveryRules.autoAllowed(db.nonce(o))) return;   // no secret: only the vendor's own Send (the order screen says so)
             if (!MerchDb.PAID.equals(o.status) && !MerchDb.CONFIRMED.equals(o.status)) return;
             if (o.payaddr == null || o.payaddr.isEmpty()) return;   // undeliverable — order screen explains
             final List<String[]> todo = new ArrayList<>();
@@ -844,7 +845,12 @@ public class MainActivity extends AppCompatActivity {
             // NFT delivery — order lines that carry an NFT tokenid (from an NFT Studio .shop)
             List<String[]> nfts = m.nfts;
             if (!nfts.isEmpty()) {
-                body.addView(sectionLabel(m.autoOn ? "NFT delivery · automatic" : "NFT delivery"));
+                boolean byHand = m.autoOn && !DeliveryRules.autoAllowed(m.nonce);
+                body.addView(sectionLabel(m.autoOn && !byHand ? "NFT delivery · automatic" : "NFT delivery"));
+                if (byHand) {
+                    TextView bh = label("This order came from an older Shop that does not prove which payment is its own, so it is never sent automatically: check it and send by hand.");
+                    bh.setTextColor(Design.RED); body.addView(bh);
+                }
                 for (String[] line : nfts) body.addView(nftSendRow(m, o, line));
             }
         }
