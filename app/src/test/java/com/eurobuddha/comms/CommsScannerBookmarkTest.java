@@ -42,10 +42,11 @@ public class CommsScannerBookmarkTest {
     }
 
     @Test public void theWindow() {
-        assertEquals("a first pass", 64, CommsScanner.targetDepth(true, 100, 0));
-        assertEquals("no tip", 64, CommsScanner.targetDepth(false, 0, 90));
-        assertEquals("the gap and the margin (orders as payments)", 3 + CommsScanner.REREAD_MARGIN, CommsScanner.targetDepth(false, 100, 98));
-        assertEquals("never more than 64", 64, CommsScanner.targetDepth(false, 1000, 1));
+        assertEquals("a first pass", 64, CommsScanner.targetDepth(true, 100, 0, false));
+        assertEquals("no tip", 64, CommsScanner.targetDepth(false, 0, 90, false));
+        assertEquals("orders: the gap only", 3, CommsScanner.targetDepth(false, 100, 98, false));
+        assertEquals("payments: the gap and the margin", 3 + CommsScanner.REREAD_MARGIN, CommsScanner.targetDepth(false, 100, 98, true));
+        assertEquals("never more than 64", 64, CommsScanner.targetDepth(false, 1000, 1, true));
     }
 
     @Test public void aFollowingScannersBookmarkNeverPassesTheLeadsAndItHasNoThrottle() throws Exception {

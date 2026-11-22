@@ -65,9 +65,9 @@ public class CommsScannerPartialReadTest {
         new CommsScanner(node(4, served, 60), null, CommsScannerBookmarkTest.store(m), CommsScannerBookmarkTest.ADDR, (id, o, c) -> false, (k, n) -> ok[0] = k).scan(60);
         assertTrue(ok[0]);
         assertEquals("60", m.get("scanned_tip_4D494E49"));
-        int reached = 0;   // the pages cover every block from the tip down to depth 21 and the margin, with no hole
+        int reached = 0;   // the pages cover every block from the tip down to depth 21, with no hole
         for (int[] p : served) { assertTrue("a hole below " + reached, p[0] <= reached); reached = Math.max(reached, p[1]); }
-        assertEquals(21 + CommsScanner.REREAD_MARGIN, reached);
+        assertEquals(21, reached);
         assertFalse("nothing was skipped", m.keySet().stream().anyMatch(k -> k.startsWith("unread_")));
     }
 

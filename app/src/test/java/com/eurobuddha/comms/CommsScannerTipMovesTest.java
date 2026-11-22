@@ -26,12 +26,13 @@ public class CommsScannerTipMovesTest {
     static final String PAY = "0x" + "12".repeat(32), BM = "scanned_tip_pay_12121212", UNREAD = "unread_pay_12121212:";
 
     static final class Node {
-        long tip; int perCall, onceAfterFirst, calls, maxSpan = Integer.MAX_VALUE;
+        long tip; int perCall, onceAfterFirst, calls, maxSpan = Integer.MAX_VALUE, blockFails;
         final Set<Long> refuse = new HashSet<>();
         NodeApi api() {
             NodeApi n = mock(NodeApi.class);
             doAnswer(inv -> {
                 NodeApi.Cb cb = inv.getArgument(1); String c = inv.getArgument(0);
+                if ("block".equals(c) && blockFails-- > 0) { cb.onError("timeout"); return null; }
                 if ("block".equals(c)) { cb.onResult(new JSONObject().put("status", true).put("response", new JSONObject().put("block", String.valueOf(tip)))); return null; }
                 Matcher m = PAGE.matcher(c);
                 if (!m.matches()) { cb.onResult(new JSONObject().put("status", true).put("response", new JSONArray())); return null; }
@@ -121,8 +122,52 @@ public class CommsScannerTipMovesTest {
         noSilentHole(m, 101, seen);
     }
 
-    /** The orders scan reads the margin back too (as payments): a block 5 below the bookmark is read again. */
-    @Test public void theOrdersScanReadsTheMarginToo() {
+    /** 2026-11-22 (final review F1 b): a tip that cannot be read holds the bookmark, but every page was read: it is not
+     *  a refused pass (no count toward the stall line, no refused blocks). */
+    @Test public void aTipThatCannotBeReadHoldsTheBookmarkButIsNotARefusedPass() {
+        Map<String, String> m = start(95); Set<Long> seen = new TreeSet<>();
+        Node node = new Node(); node.tip = 100; node.blockFails = 99;
+        assertFalse(pass(node, m, 100, seen));
+        assertEquals("95", m.get(BM));
+        assertNull("not counted: " + m, m.get("failedpasses_pay_12121212"));
+        assertTrue(m.getOrDefault("refusedblocks_pay_12121212", "").isEmpty());
+    }
+
+    /** F1: a tip read that failed once is read again: the pass ends whole. */
+    @Test public void aTipReadThatFailedIsReadAgain() {
+        Map<String, String> m = start(95); Set<Long> seen = new TreeSet<>();
+        Node node = new Node(); node.tip = 100; node.blockFails = 1;
+        assertTrue(pass(node, m, 100, seen));
+        assertEquals("100", m.get(BM));
+    }
+
+    /** F1: the tip moves one block on every page: the blocks it left are read with the margin below them, so the pass
+     *  ends whole although the tip moved again while they were read; no block is left unread. */
+    @Test public void aTipThatMovesWhileTheBlocksItLeftAreReadIsStillCovered() {
+        Map<String, String> m = start(95); Set<Long> seen = new TreeSet<>();
+        Node node = new Node(); node.tip = 100; node.perCall = 1;
+        assertTrue(pass(node, m, 100, seen));
+        assertEquals("100", m.get(BM));
+        noSilentHole(m, 96, seen);
+    }
+
+    /** F1 d: one refused pass, then the Inbox closed for a long time: only the blocks that pass tried are said refused;
+     *  the rest of the gap is the window's. */
+    @Test public void aRefusedPassBeforeALongCloseLabelsOnlyWhatItTried() {
+        Map<String, String> m = start(99); Set<Long> seen = new TreeSet<>();
+        Node node = new Node(); node.tip = 101; node.refuse.add(100L);
+        assertFalse(pass(node, m, 101, seen));
+        assertEquals("1", m.get("failedpasses_pay_12121212"));
+        node.refuse.clear(); node.tip = 400;
+        assertTrue(pass(node, m, 400, seen));
+        assertEquals("101 refused", m.get(UNREAD + "100"));
+        assertEquals("336", m.get(UNREAD + "102"));
+        assertEquals("0", m.get("failedpasses_pay_12121212"));
+        noSilentHole(m, 100, seen);
+    }
+
+    /** The orders scan reads its gap only (orders are stored idempotently; the tip read again covers a tip that moved). */
+    @Test public void theOrdersScanReadsItsGapOnly() {
         Map<String, String> m = new HashMap<>(); m.put("backfilled_4D494E49", "true"); m.put("scanned_tip_4D494E49", "95");
         Node node = new Node(); node.tip = 100;
         Set<String> asked = new TreeSet<>();
@@ -130,6 +175,7 @@ public class CommsScannerTipMovesTest {
         NodeApi spy = mock(NodeApi.class);
         doAnswer(inv -> { asked.add(inv.getArgument(0)); api.cmd(inv.getArgument(0), inv.getArgument(1)); return null; }).when(spy).cmd(anyString(), any(NodeApi.Cb.class));
         new CommsScanner(spy, null, CommsScannerBookmarkTest.store(m), CommsScannerBookmarkTest.ADDR, (id, o, c) -> false, (k, n) -> {}).scan(100);
-        assertTrue(asked.toString(), asked.stream().anyMatch(c -> c.contains("depth:" + (6 + CommsScanner.REREAD_MARGIN))));
+        assertTrue(asked.toString(), asked.stream().anyMatch(c -> c.endsWith("depth:6")));
+        assertFalse(asked.toString(), asked.stream().anyMatch(c -> c.contains("depth:" + (6 + CommsScanner.REREAD_MARGIN))));
     }
 }

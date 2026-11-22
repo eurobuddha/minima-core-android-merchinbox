@@ -332,13 +332,18 @@ public class MainActivity extends AppCompatActivity {
     /** The orders scanner's bookmark: every order mined up to this block was read and stored. */
     static final String ORDERS_TIP = CommsScanner.tipKey(CommsTransport.MINIMERCH_ADDRESS, true);
     static final String ORDERS_FAILS = CommsScanner.failsKey(CommsTransport.MINIMERCH_ADDRESS, true);
+    static final String ORDERS_REFUSED = CommsScanner.refusedKey(CommsTransport.MINIMERCH_ADDRESS, true);
 
-    /** The orders scan is stalled (r3 I4): 5 passes in a row ended partly read, or one did and the tip is more than 64
-     *  blocks past the orders bookmark (without a failed pass that is only the Inbox not reading, said once read). */
+    /** The orders scan is stalled (r3 I4): 5 passes in a row had a page refused or failed, or one did and the tip is more
+     *  than 64 blocks past the orders bookmark (without a failed pass that is only the Inbox not reading, said once read).
+     *  A pass that read every page but could not confirm the tip is not one; with no refused blocks there is no line. */
     boolean ordersStalled() {
         long bm = parseBlock(db.getMeta(ORDERS_TIP, "0")), fails = parseBlock(db.getMeta(ORDERS_FAILS, "0"));
-        return bm > 0 && (fails >= 5 || fails >= 1 && chainBlock - bm > 64);
+        return bm > 0 && !ordersRefusedFrom().isEmpty() && (fails >= 5 || fails >= 1 && chainBlock - bm > 64);
     }
+
+    /** The lowest block the refused passes could not read (CommsScanner.refusedKey), "" when none. */
+    String ordersRefusedFrom() { return db.getMeta(ORDERS_REFUSED, "").split(" ")[0]; }
     volatile boolean stallShown;
 
     private void askForSeed() {
@@ -644,7 +649,7 @@ public class MainActivity extends AppCompatActivity {
         io.execute(() -> {
             final List<String[]> gaps = unreadRanges();
             final boolean stalled = stallShown = ordersStalled();
-            final String since = db.getMeta(ORDERS_TIP, "0");
+            final String since = ordersRefusedFrom();
             ui.post(() -> {
                 if (stalled) { TextView t = label("Orders have not been read since block " + since + ": the node refused the reads."); t.setTextColor(Design.RED); unread.addView(t); }
                 for (String[] g : gaps) unread.addView(unreadLine(g));

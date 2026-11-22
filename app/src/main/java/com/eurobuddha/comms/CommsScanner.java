@@ -41,9 +41,11 @@ public final class CommsScanner {
     private static final int START_DEPTH = 4;          // every scan's FIRST query is this small + safe
     private static final int MAX_DEPTH = 64;           // grow no deeper than this in one pass
     private static final long MIN_INTERVAL_MS = 4000;  // throttle: don't hammer the node on bursts
-    /** Every pass reads this many blocks more than its gap (the orders scan as the payments scan, r3). */
+    /** A scanner that follows another ({@link #follows}: payments) reads this many blocks more than its gap on every pass.
+     *  The orders scan reads its gap only (orders are stored idempotently and the tip read again covers a tip that moved);
+     *  the blocks a moved tip left are read with this margin below them, in the same page. */
     static final int REREAD_MARGIN = 8;
-    /** How many times a pass reads the tip again before it ends partly read (the tip moved on every page). */
+    /** How many times a pass reads the tip again before it ends with its bookmark held (the tip moved on every page). */
     private static final int TIP_CHECKS = 3;
 
     private final NodeApi node;
@@ -55,7 +57,8 @@ public final class CommsScanner {
     private final boolean decrypt;              // true: open state[99]; false: hand every coin raw (payments)
     private final String bmBackfilled, bmTip;   // address-namespaced bookmark keys
     private final String bmWhole;               // every block up to it was read whole or noted unread (r3 I2)
-    private final String bmFails;               // passes in a row that ended partly read (the node refused a read)
+    private final String bmFails;               // passes in a row that ended partly read (the node refused or failed a page)
+    private final String bmRefused;             // "lo hi": the blocks those passes tried and did not all read
     private String leadTip;                      // follows(): the bookmark of the scan this one runs after
     private int passTip;                         // what this pass's bookmark will say, once it is read whole
     private int startTip;                        // the bookmark this pass started from
@@ -89,6 +92,7 @@ public final class CommsScanner {
         this.bmTip = tipKey(targetAddress, decrypt);
         this.bmWhole = "readwhole_" + (decrypt ? "" : "pay_") + tag;
         this.bmFails = failsKey(targetAddress, decrypt);
+        this.bmRefused = refusedKey(targetAddress, decrypt);
     }
 
     /** The key of a scanner's tip bookmark: the chain tip its last whole pass read up to. */
@@ -96,17 +100,24 @@ public final class CommsScanner {
         return "scanned_tip_" + (decrypt ? "" : "pay_") + (targetAddress.length() > 10 ? targetAddress.substring(2, 10) : targetAddress);
     }
 
-    /** The key of the count of a scanner's passes in a row that ended partly read (0 after a whole pass). */
+    /** The key of the count of a scanner's passes in a row that ended partly read because the node refused or failed a
+     *  page (0 after a whole pass; a pass that read every page but could not confirm the tip is not counted). */
     public static String failsKey(String targetAddress, boolean decrypt) {
         return "failedpasses_" + (decrypt ? "" : "pay_") + (targetAddress.length() > 10 ? targetAddress.substring(2, 10) : targetAddress);
+    }
+
+    /** The key of "lo hi": the lowest block that the passes counted by {@link #failsKey} could not read (blocks read whole
+     *  before excluded) and the highest block they tried; empty after a whole pass. */
+    public static String refusedKey(String targetAddress, boolean decrypt) {
+        return "refusedblocks_" + (decrypt ? "" : "pay_") + (targetAddress.length() > 10 ? targetAddress.substring(2, 10) : targetAddress);
     }
 
     /** The prefix of the blocks a scanner did not read and will not read ({@code <prefix><first block>} = last block):
      *  a gap wider than {@link #MAX_DEPTH} (the Inbox was closed, or a block the node never served stayed in the window
      *  until it left it). The Inbox shows them; they are never claimed as read. */
     public static final String UNREAD = "unread_";
-    /** Appended to a range's last block when a pass since the last whole one ended partly read: the node refused reads
-     *  (without it, the range is only the 64-block window: the Inbox was not reading). */
+    /** Appended to a range's last block when passes since the last whole one tried to read it and the node refused or
+     *  failed a page (without it, the range is only the 64-block window: the Inbox was not reading). */
     public static final String REFUSED = " refused";
     public static String unreadKey(String targetAddress, boolean decrypt) {
         return UNREAD + (decrypt ? "" : "pay_") + (targetAddress.length() > 10 ? targetAddress.substring(2, 10) : targetAddress) + ":";
@@ -120,11 +131,11 @@ public final class CommsScanner {
     public void follows(String leadTipKey) { leadTip = leadTipKey; }
 
     /** How many blocks a pass reads back from the tip: the gap since the bookmark (all of {@link #MAX_DEPTH} on a first
-     *  pass or with no tip), plus the margin; never more than MAX_DEPTH. */
-    static int targetDepth(boolean backfill, int chainBlock, int scannedTip) {
+     *  pass or with no tip), plus the margin for a scanner that follows another; never more than MAX_DEPTH. */
+    static int targetDepth(boolean backfill, int chainBlock, int scannedTip, boolean follows) {
         if (backfill || chainBlock <= 0) return MAX_DEPTH;
         int gap = Math.max(1, chainBlock - scannedTip + 1);
-        return Math.min(MAX_DEPTH, gap + REREAD_MARGIN);
+        return Math.min(MAX_DEPTH, follows ? gap + REREAD_MARGIN : gap);
     }
 
     /** Starts a pass; false when it did not start (a pass is running, or the throttle). */
@@ -135,7 +146,7 @@ public final class CommsScanner {
         backfillRun = meta.getMeta(bmBackfilled, "").isEmpty();
         int scannedTip = parseInt(meta.getMeta(bmTip, "0"));
         startTip = scannedTip;
-        targetDepth = targetDepth(backfillRun, chainBlock, scannedTip);
+        targetDepth = targetDepth(backfillRun, chainBlock, scannedTip, leadTip != null);
         bottom = chainBlock - targetDepth;
         passTip = leadTip == null ? chainBlock : Math.min(chainBlock, parseInt(meta.getMeta(leadTip, "0")));
         depth = Math.min(START_DEPTH, targetDepth);    // ALWAYS start small — never an unbounded query
@@ -174,7 +185,9 @@ public final class CommsScanner {
     /** The pages were read back from the node's tip when each was served, which may be above {@code chainBlock}: the
      *  tip is read again and the blocks it is above {@link #bottom} by and were not read yet are read, as an older
      *  window, before the pass ends (r3: a tip that moved k blocks left the lowest k blocks unread while the bookmark
-     *  moved). A tip that cannot be read, or that moved on every page, ends the pass partly read. */
+     *  moved). A tip that cannot be read is read again; after {@link #TIP_CHECKS} reads (or a tip that moved every time)
+     *  the pass ends with its bookmark held, but every page was read: it is not counted as a refused pass (only a refused
+     *  or failed page is). */
     private void checkTip(final int chainBlock) {
         if (chainBlock <= 0) { finish(chainBlock, true); return; }
         node.cmd("block", new NodeApi.Cb() {
@@ -182,11 +195,12 @@ public final class CommsScanner {
                 JSONObject r = j.optJSONObject("response");
                 int tip = r == null || !j.optBoolean("status", true) ? 0 : parseInt(r.optString("block", ""));
                 if (tip > 0 && tip - bottom <= read) { finish(chainBlock, true); return; }
-                if (tip <= 0 || ++tipChecks > TIP_CHECKS) { finish(chainBlock, false); return; }
-                targetDepth = tip - bottom; paging = true; depth = targetDepth;
+                if (++tipChecks > TIP_CHECKS) { finish(chainBlock, false, true); return; }
+                if (tip <= 0) { checkTip(chainBlock); return; }
+                targetDepth = tip - bottom + REREAD_MARGIN; paging = true; depth = targetDepth;   // a tip that moves again while they are read stays covered
                 fetch(chainBlock);
             }
-            @Override public void onError(String message) { finish(chainBlock, false); }
+            @Override public void onError(String message) { if (++tipChecks > TIP_CHECKS) finish(chainBlock, false, true); else checkTip(chainBlock); }
         });
     }
 
@@ -205,21 +219,37 @@ public final class CommsScanner {
         else finish(chainBlock, false);
     }
 
-    private void finish(int chainBlock, boolean ok) {
+    private void finish(int chainBlock, boolean ok) { finish(chainBlock, ok, false); }
+
+    /** {@code held}: every page was read but the tip could not be confirmed; the bookmark stays and it is not counted (a
+     *  window that reached below the refused blocks clears them: what the refused passes left was read). */
+    private void finish(int chainBlock, boolean ok, boolean held) {
         // Blocks this pass did not reach (a gap over the window) that no earlier pass read whole: the payment scan's
         // bookmark stays at the orders read while each pass reads 64 back, so its own read-whole mark says what it read
         // (r3 I2), and a block it can never read again is noted at once. The lowest block read is named too: never fewer.
+        // Only the part that refused passes tried is noted as refused; the rest of the gap is the window's.
         int whole = parseInt(meta.getMeta(bmWhole, "0")), fails = parseInt(meta.getMeta(bmFails, "0"));
         int from = Math.max(startTip, whole) + 1;
-        if (ok && !backfillRun && startTip > 0 && bottom - 1 >= from)
-            meta.setMeta(unreadKey(targetAddress, decrypt) + from, bottom + (fails > 0 ? REFUSED : ""));
+        String[] refused = meta.getMeta(bmRefused, "").split(" ");
+        int lo = refused.length == 2 ? parseInt(refused[0]) : 0, hi = refused.length == 2 ? parseInt(refused[1]) : -1;
+        if (ok && !backfillRun && startTip > 0 && bottom - 1 >= from) {
+            int a = Math.max(from, lo), b = Math.min(bottom, hi);
+            if (a > b) note(from, bottom, "");
+            else { if (a > from) note(from, a - 1, ""); note(a, b, REFUSED); if (b < bottom) note(b + 1, bottom, ""); }
+        }
         if (ok && chainBlock > whole) meta.setMeta(bmWhole, String.valueOf(chainBlock));
-        if (ok ? fails > 0 : chainBlock > 0) meta.setMeta(bmFails, String.valueOf(ok ? 0 : fails + 1));
+        boolean clear = ok || held && hi >= 0 && bottom <= lo;   // every page over the refused blocks was read: nothing left to report
+        if (clear ? fails > 0 : chainBlock > 0 && !held) meta.setMeta(bmFails, String.valueOf(clear ? 0 : fails + 1));
+        if (clear && hi >= 0) meta.setMeta(bmRefused, "");
+        if (!ok && !held && chainBlock > 0)   // what this pass tried and did not all read: from its lowest unread block to its top
+            meta.setMeta(bmRefused, (hi < 0 ? Math.max(bottom, from) : Math.min(lo, Math.max(bottom, from))) + " " + Math.max(hi, bottom + targetDepth));
         if (ok) meta.setMeta(bmBackfilled, "true");
         if (ok && passTip > 0) meta.setMeta(bmTip, String.valueOf(passTip));   // a failed or partial read moves nothing: read again next pass
         running = false; lastScanEnd = System.currentTimeMillis();
         listener.onDone(ok, newThisRun);
     }
+
+    private void note(int first, int last, String why) { meta.setMeta(unreadKey(targetAddress, decrypt) + first, last + why); }
 
     private void finishFail() { running = false; lastScanEnd = System.currentTimeMillis(); listener.onDone(false, 0); }
 
