@@ -42,16 +42,16 @@ public class CommsScannerBookmarkTest {
     }
 
     @Test public void theWindow() {
-        assertEquals("a first pass", 64, CommsScanner.targetDepth(true, 100, 0, false));
-        assertEquals("no tip", 64, CommsScanner.targetDepth(false, 0, 90, false));
-        assertEquals("orders: the gap, as before", 3, CommsScanner.targetDepth(false, 100, 98, false));
-        assertEquals("payments: the gap and the margin", 2 + CommsScanner.REREAD_MARGIN, CommsScanner.targetDepth(false, 100, 99, true));
-        assertEquals("never more than 64", 64, CommsScanner.targetDepth(false, 1000, 1, true));
+        assertEquals("a first pass", 64, CommsScanner.targetDepth(true, 100, 0));
+        assertEquals("no tip", 64, CommsScanner.targetDepth(false, 0, 90));
+        assertEquals("the gap and the margin (orders as payments)", 3 + CommsScanner.REREAD_MARGIN, CommsScanner.targetDepth(false, 100, 98));
+        assertEquals("never more than 64", 64, CommsScanner.targetDepth(false, 1000, 1));
     }
 
     @Test public void aFollowingScannersBookmarkNeverPassesTheLeadsAndItHasNoThrottle() throws Exception {
         NodeApi node = mock(NodeApi.class);
-        doAnswer(inv -> { ((NodeApi.Cb) inv.getArgument(1)).onResult(new JSONObject().put("status", true).put("response", new JSONArray())); return null; })
+        doAnswer(inv -> { ((NodeApi.Cb) inv.getArgument(1)).onResult(new JSONObject().put("status", true).put("response",
+                "block".equals(inv.getArgument(0)) ? new JSONObject().put("block", "95") : new JSONArray())); return null; })
                 .when(node).cmd(anyString(), any(NodeApi.Cb.class));
         Map<String, String> m = new HashMap<>();
         m.put("backfilled_pay_12121212", "true"); m.put("scanned_tip_pay_12121212", "90"); m.put("scanned_tip_4D494E49", "92");

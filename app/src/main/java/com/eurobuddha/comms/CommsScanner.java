@@ -14,7 +14,8 @@ import java.util.Set;
  * (depth 4), grows only while replies come back safely, probes smaller on an over-limit/dropped reply,
  * and is throttled so block bursts can't hammer the node. A deeper page refused after a smaller one was read is
  * read in older windows (`coinage:`, halved while refused, as the Inbox's "Find this order's payment" does); the
- * bookmark moves only when the whole range was read (2026-11-22).
+ * bookmark moves only when the whole range was read (2026-11-22). Every page is read back from the node's tip of the
+ * moment, so before a pass ends the tip is read again and, if it moved, the blocks it moved by are read too (r3).
  *
  * Generalized for miniMall: the target address + the per-coin handling are injected, so one instance can
  * scan the shared MINIMERCH address (inbox: incoming orders; shop: status/chat) while a {@link Router}
@@ -40,8 +41,10 @@ public final class CommsScanner {
     private static final int START_DEPTH = 4;          // every scan's FIRST query is this small + safe
     private static final int MAX_DEPTH = 64;           // grow no deeper than this in one pass
     private static final long MIN_INTERVAL_MS = 4000;  // throttle: don't hammer the node on bursts
-    /** A scanner that follows another ({@link #follows}) reads this many blocks more than its gap on every pass. */
+    /** Every pass reads this many blocks more than its gap (the orders scan as the payments scan, r3). */
     static final int REREAD_MARGIN = 8;
+    /** How many times a pass reads the tip again before it ends partly read (the tip moved on every page). */
+    private static final int TIP_CHECKS = 3;
 
     private final NodeApi node;
     private final CryptoProvider crypto;
@@ -54,6 +57,8 @@ public final class CommsScanner {
     private String leadTip;                      // follows(): the bookmark of the scan this one runs after
     private int passTip;                         // what this pass's bookmark will say, once it is read whole
     private int startTip;                        // the bookmark this pass started from
+    private int bottom;                          // the lowest block this pass must read: its chainBlock - targetDepth
+    private int tipChecks;
     private boolean backfillRun;
     private int read;                            // blocks read back from the tip this pass, whole
     private boolean paging;                      // a deeper page was refused: the rest is read in older windows
@@ -103,22 +108,23 @@ public final class CommsScanner {
     public void follows(String leadTipKey) { leadTip = leadTipKey; }
 
     /** How many blocks a pass reads back from the tip: the gap since the bookmark (all of {@link #MAX_DEPTH} on a first
-     *  pass or with no tip), plus the margin for a scanner that follows another; never more than MAX_DEPTH. */
-    static int targetDepth(boolean backfill, int chainBlock, int scannedTip, boolean follows) {
+     *  pass or with no tip), plus the margin; never more than MAX_DEPTH. */
+    static int targetDepth(boolean backfill, int chainBlock, int scannedTip) {
         if (backfill || chainBlock <= 0) return MAX_DEPTH;
         int gap = Math.max(1, chainBlock - scannedTip + 1);
-        return Math.min(MAX_DEPTH, follows ? gap + REREAD_MARGIN : gap);
+        return Math.min(MAX_DEPTH, gap + REREAD_MARGIN);
     }
 
     /** Starts a pass; false when it did not start (a pass is running, or the throttle). */
     public boolean scan(final int chainBlock) {
         if (running) return false;
         if (leadTip == null && System.currentTimeMillis() - lastScanEnd < MIN_INTERVAL_MS) return false;   // throttle
-        running = true; grew = false; newThisRun = 0; seenCoins.clear(); read = 0; paging = false;
+        running = true; grew = false; newThisRun = 0; seenCoins.clear(); read = 0; paging = false; tipChecks = 0;
         backfillRun = meta.getMeta(bmBackfilled, "").isEmpty();
         int scannedTip = parseInt(meta.getMeta(bmTip, "0"));
         startTip = scannedTip;
-        targetDepth = targetDepth(backfillRun, chainBlock, scannedTip, leadTip != null);
+        targetDepth = targetDepth(backfillRun, chainBlock, scannedTip);
+        bottom = chainBlock - targetDepth;
         passTip = leadTip == null ? chainBlock : Math.min(chainBlock, parseInt(meta.getMeta(leadTip, "0")));
         depth = Math.min(START_DEPTH, targetDepth);    // ALWAYS start small — never an unbounded query
         if (tracked) { fetch(chainBlock); return true; }
@@ -144,12 +150,31 @@ public final class CommsScanner {
                     depth = paging ? Math.min(read + window, targetDepth) : Math.min(depth * 2, targetDepth);
                     fetch(chainBlock);
                 }
-                else finish(chainBlock, true);
+                else checkTip(chainBlock);
             }
             @Override public void onError(String message) {
                 if (NodeApi.ERR_NOT_ENABLED.equals(message)) { finishFail(); return; }
                 overLimit(chainBlock);
             }
+        });
+    }
+
+    /** The pages were read back from the node's tip when each was served, which may be above {@code chainBlock}: the
+     *  tip is read again and the blocks it is above {@link #bottom} by and were not read yet are read, as an older
+     *  window, before the pass ends (r3: a tip that moved k blocks left the lowest k blocks unread while the bookmark
+     *  moved). A tip that cannot be read, or that moved on every page, ends the pass partly read. */
+    private void checkTip(final int chainBlock) {
+        if (chainBlock <= 0) { finish(chainBlock, true); return; }
+        node.cmd("block", new NodeApi.Cb() {
+            @Override public void onResult(JSONObject j) {
+                JSONObject r = j.optJSONObject("response");
+                int tip = r == null || !j.optBoolean("status", true) ? 0 : parseInt(r.optString("block", ""));
+                if (tip > 0 && tip - bottom <= read) { finish(chainBlock, true); return; }
+                if (tip <= 0 || ++tipChecks > TIP_CHECKS) { finish(chainBlock, false); return; }
+                targetDepth = tip - bottom; paging = true; depth = targetDepth;
+                fetch(chainBlock);
+            }
+            @Override public void onError(String message) { finish(chainBlock, false); }
         });
     }
 
@@ -169,8 +194,8 @@ public final class CommsScanner {
     }
 
     private void finish(int chainBlock, boolean ok) {
-        if (ok && !backfillRun && startTip > 0) {   // blocks the bookmark moves past that this pass did not reach (a gap over the window)
-            int to = Math.min(passTip, chainBlock - targetDepth - 1);
+        if (ok && !backfillRun && startTip > 0 && bottom - 1 > startTip) {   // blocks the bookmark moves past that this pass did not reach
+            int to = Math.min(passTip, bottom);   // a gap over the window; the lowest block read is named too: never fewer
             if (to > startTip) meta.setMeta(unreadKey(targetAddress, decrypt) + (startTip + 1), String.valueOf(to));
         }
         if (ok) meta.setMeta(bmBackfilled, "true");

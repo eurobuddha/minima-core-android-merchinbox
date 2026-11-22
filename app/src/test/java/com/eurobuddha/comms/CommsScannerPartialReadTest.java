@@ -22,11 +22,12 @@ import java.util.regex.Pattern;
 public class CommsScannerPartialReadTest {
     static final Pattern PAGE = Pattern.compile("coins address:\\S+ order:desc depth:([0-9]+)( coinage:([0-9]+))?");
 
-    /** A node that serves a page only when it spans at most {@code most} blocks (depth - coinage); records each page. */
-    static NodeApi node(int most, List<int[]> served) {
+    /** A node at {@code tip} that serves a page only when it spans at most {@code most} blocks (depth - coinage); records each page. */
+    static NodeApi node(int most, List<int[]> served, int tip) {
         NodeApi node = mock(NodeApi.class);
         doAnswer(inv -> {
             NodeApi.Cb cb = inv.getArgument(1); Matcher m = PAGE.matcher((String) inv.getArgument(0));
+            if ("block".equals(inv.getArgument(0))) { cb.onResult(new JSONObject().put("status", true).put("response", new JSONObject().put("block", String.valueOf(tip)))); return null; }
             if (!m.matches()) { cb.onResult(new JSONObject().put("status", true).put("response", new JSONArray())); return null; }
             int depth = Integer.parseInt(m.group(1)), coinage = m.group(3) == null ? 0 : Integer.parseInt(m.group(3));
             if (depth - coinage > most) { cb.onResult(new JSONObject().put("status", false)); return null; }
@@ -61,12 +62,12 @@ public class CommsScannerPartialReadTest {
         m.put("backfilled_4D494E49", "true"); m.put("scanned_tip_4D494E49", "40");
         List<int[]> served = new ArrayList<>();
         boolean[] ok = {false};
-        new CommsScanner(node(4, served), null, CommsScannerBookmarkTest.store(m), CommsScannerBookmarkTest.ADDR, (id, o, c) -> false, (k, n) -> ok[0] = k).scan(60);
+        new CommsScanner(node(4, served, 60), null, CommsScannerBookmarkTest.store(m), CommsScannerBookmarkTest.ADDR, (id, o, c) -> false, (k, n) -> ok[0] = k).scan(60);
         assertTrue(ok[0]);
         assertEquals("60", m.get("scanned_tip_4D494E49"));
-        int reached = 0;   // the pages cover every block from the tip down to depth 21, with no hole
+        int reached = 0;   // the pages cover every block from the tip down to depth 21 and the margin, with no hole
         for (int[] p : served) { assertTrue("a hole below " + reached, p[0] <= reached); reached = Math.max(reached, p[1]); }
-        assertEquals(21, reached);
+        assertEquals(21 + CommsScanner.REREAD_MARGIN, reached);
         assertFalse("nothing was skipped", m.keySet().stream().anyMatch(k -> k.startsWith("unread_")));
     }
 
@@ -74,9 +75,9 @@ public class CommsScannerPartialReadTest {
     @Test public void aGapOverTheWindowIsNotedNotClaimed() {
         Map<String, String> m = new HashMap<>();
         m.put("backfilled_4D494E49", "true"); m.put("scanned_tip_4D494E49", "100");
-        new CommsScanner(node(64, new ArrayList<>()), null, CommsScannerBookmarkTest.store(m), CommsScannerBookmarkTest.ADDR, (id, o, c) -> false, (k, n) -> {}).scan(300);
+        new CommsScanner(node(64, new ArrayList<>(), 300), null, CommsScannerBookmarkTest.store(m), CommsScannerBookmarkTest.ADDR, (id, o, c) -> false, (k, n) -> {}).scan(300);
         assertEquals("300", m.get("scanned_tip_4D494E49"));
-        assertEquals("blocks 101 to 235 were never read (the pass read 236 to 300)", "235", m.get("unread_4D494E49:101"));
+        assertEquals("blocks 101 to 235 were never read (the pass read 236 to 300), and 236 is named too", "236", m.get("unread_4D494E49:101"));
     }
 
     /** The payment scanner follows the orders read: only what its own bookmark moves past is noted. */
@@ -84,7 +85,7 @@ public class CommsScannerPartialReadTest {
         Map<String, String> m = new HashMap<>();
         String pay = "0x" + "12".repeat(32);
         m.put("backfilled_pay_12121212", "true"); m.put("scanned_tip_pay_12121212", "100"); m.put("scanned_tip_4D494E49", "150");
-        CommsScanner s = new CommsScanner(node(64, new ArrayList<>()), null, CommsScannerBookmarkTest.store(m), pay, (id, o, c) -> false, (k, n) -> {}, false);
+        CommsScanner s = new CommsScanner(node(64, new ArrayList<>(), 300), null, CommsScannerBookmarkTest.store(m), pay, (id, o, c) -> false, (k, n) -> {}, false);
         s.follows("scanned_tip_4D494E49");
         s.scan(300);
         assertEquals("150", m.get("scanned_tip_pay_12121212"));
