@@ -932,7 +932,7 @@ public class MainActivity extends AppCompatActivity {
             body.addView(chk);
             body.addView(kv("Reference", o.ref));
             if (!o.shopName.isEmpty()) body.addView(kv("Shop", o.shopName));
-            if (!o.coinid.isEmpty()) body.addView(copyRow("Order tx", o.coinid, o.coinid));
+            if (!o.coinid.isEmpty() && (m.conflict || !m.nonce.isEmpty())) body.addView(copyRow("Order tx", o.coinid, o.coinid));   // else in the facts above, once
 
             // delivery
             body.addView(sectionLabel("Delivery"));

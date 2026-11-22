@@ -86,4 +86,12 @@ public class OldShopStatusTest extends DrainTest {
         OldShopSendTest.find(detail(), MerchDb.DELIVERED).performClick(); ShadowLooper.idleMainLooper();
         assertEquals("from SHIPPED it is marked at once", MerchDb.DELIVERED, db.order(REF).status);
     }
+
+    /** Final review F6: the order coin of a no-secret order is shown once (in the facts), not again as "Order tx". */
+    @Test public void theOrderCoinIsShownOnce() throws Exception {
+        physicalOrder(tip - 8, tip - 10);
+        String all = texts(detail());
+        assertEquals(all, 1, all.split(java.util.regex.Pattern.quote(ORDER_COIN), -1).length - 1);
+        assertTrue(all, all.contains("Order coin (block " + (tip - 8) + ")"));
+    }
 }
