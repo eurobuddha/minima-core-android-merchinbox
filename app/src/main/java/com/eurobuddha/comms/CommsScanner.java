@@ -88,12 +88,17 @@ public final class CommsScanner {
         this.bmBackfilled = "backfilled_" + (decrypt ? "" : "pay_") + tag;
         this.bmTip = tipKey(targetAddress, decrypt);
         this.bmWhole = "readwhole_" + (decrypt ? "" : "pay_") + tag;
-        this.bmFails = "failedpasses_" + (decrypt ? "" : "pay_") + tag;
+        this.bmFails = failsKey(targetAddress, decrypt);
     }
 
     /** The key of a scanner's tip bookmark: the chain tip its last whole pass read up to. */
     public static String tipKey(String targetAddress, boolean decrypt) {
         return "scanned_tip_" + (decrypt ? "" : "pay_") + (targetAddress.length() > 10 ? targetAddress.substring(2, 10) : targetAddress);
+    }
+
+    /** The key of the count of a scanner's passes in a row that ended partly read (0 after a whole pass). */
+    public static String failsKey(String targetAddress, boolean decrypt) {
+        return "failedpasses_" + (decrypt ? "" : "pay_") + (targetAddress.length() > 10 ? targetAddress.substring(2, 10) : targetAddress);
     }
 
     /** The prefix of the blocks a scanner did not read and will not read ({@code <prefix><first block>} = last block):

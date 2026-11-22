@@ -331,6 +331,15 @@ public class MainActivity extends AppCompatActivity {
 
     /** The orders scanner's bookmark: every order mined up to this block was read and stored. */
     static final String ORDERS_TIP = CommsScanner.tipKey(CommsTransport.MINIMERCH_ADDRESS, true);
+    static final String ORDERS_FAILS = CommsScanner.failsKey(CommsTransport.MINIMERCH_ADDRESS, true);
+
+    /** The orders scan is stalled (r3 I4): 5 passes in a row ended partly read, or one did and the tip is more than 64
+     *  blocks past the orders bookmark (without a failed pass that is only the Inbox not reading, said once read). */
+    boolean ordersStalled() {
+        long bm = parseBlock(db.getMeta(ORDERS_TIP, "0")), fails = parseBlock(db.getMeta(ORDERS_FAILS, "0"));
+        return bm > 0 && (fails >= 5 || fails >= 1 && chainBlock - bm > 64);
+    }
+    volatile boolean stallShown;
 
     private void askForSeed() {
         final EditText in = input("Your Minima seed phrase");
@@ -412,6 +421,7 @@ public class MainActivity extends AppCompatActivity {
     private int sweptBlock = -1;
 
     private void onScanDone(int newCount) {
+        final boolean restall = ordersStalled() != stallShown;   // on io, after the pass's bookmarks: the stalled line comes or goes
         ui.post(() -> {
             if (!pendingAutoDeliver.isEmpty()) {
                 List<String> refs = new ArrayList<>(pendingAutoDeliver);
@@ -419,7 +429,7 @@ public class MainActivity extends AppCompatActivity {
                 for (String r : refs) maybeAutoDeliver(r);
             }
             if (autoDeliverOn() && chainBlock > sweptBlock) { sweptBlock = chainBlock; autoDeliverSweep(); }   // once per block, not per scanner callback
-            if (newCount <= 0) return;
+            if (newCount <= 0) { if (restall) refreshVisibleOrderOrList(); return; }
             notifyNew(newCount);
             refreshVisibleOrderOrList();
         });
@@ -633,7 +643,12 @@ public class MainActivity extends AppCompatActivity {
         col.addView(rv, new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f));
         io.execute(() -> {
             final List<String[]> gaps = unreadRanges();
-            ui.post(() -> { for (String[] g : gaps) unread.addView(unreadLine(g)); });
+            final boolean stalled = stallShown = ordersStalled();
+            final String since = db.getMeta(ORDERS_TIP, "0");
+            ui.post(() -> {
+                if (stalled) { TextView t = label("Orders have not been read since block " + since + ": the node refused the reads."); t.setTextColor(Design.RED); unread.addView(t); }
+                for (String[] g : gaps) unread.addView(unreadLine(g));
+            });
             List<MerchDb.Order> all = db.orders();
             java.util.LinkedHashSet<String> shops = new java.util.LinkedHashSet<>();
             for (MerchDb.Order o : all) if (!o.shopName.isEmpty()) shops.add(o.shopName);
